@@ -28,13 +28,27 @@ class PairCointParams:
 
 @dataclass(frozen=True)
 class EtfNavParams:
-    """Parameters for ETF-NAV arbitrage strategy."""
-    entry_abs: float  # Spread threshold for entry
+    """Parameters for ETF-NAV arbitrage strategy with pyramiding."""
+    entry_levels: tuple[float, ...]  # Spread thresholds for entry/scale-up
+    entry_sizes: tuple[int, ...]  # Size to add at each entry level
+    exit_levels: tuple[float, ...]  # Spread thresholds for exit (approach 0)
+    stop_loss: float | None = None  # Hard stop if |spread| exceeds this
+    eod_flat: bool = False  # Flatten at end of day (tick 390)
     enabled: bool = True
 
     @property
     def strategy_id(self) -> str:
         return 'etf_nav'
+
+    @property
+    def max_level(self) -> int:
+        """Total levels (number of entry thresholds)."""
+        return len(self.entry_levels)
+
+    @property
+    def total_size(self) -> int:
+        """Total position size when fully scaled."""
+        return sum(self.entry_sizes)
 
 
 @dataclass
@@ -63,7 +77,11 @@ class StrategyParams:
                 ))
             elif s.get('type') == 'etf_nav':
                 etf_nav = EtfNavParams(
-                    entry_abs=s['entry_abs'],
+                    entry_levels=tuple(s['entry_levels']),
+                    entry_sizes=tuple(s['entry_sizes']),
+                    exit_levels=tuple(s['exit_levels']),
+                    stop_loss=s.get('stop_loss'),
+                    eod_flat=s.get('eod_flat', False),
                     enabled=s.get('enabled', True),
                 )
 

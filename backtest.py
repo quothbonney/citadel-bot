@@ -13,6 +13,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+import empyrical as ep
+
 from log_config import init_logging
 from market import market
 from params import StrategyParams, DEFAULT_PARAMS_PATH
@@ -202,6 +205,31 @@ class BacktestRunner:
 
         return signals
 
+    def _compute_metrics(self, pnl_curve: list[float]) -> dict:
+        """Compute risk metrics from PnL curve using empyrical."""
+        if len(pnl_curve) < 2:
+            return {}
+
+        pnl = np.array(pnl_curve)
+        returns = np.diff(pnl) / (self.scale * 100)  # Normalize by notional
+
+        # Handle edge cases
+        if len(returns) == 0 or np.all(returns == 0):
+            return {}
+
+        # Compute max drawdown from PnL curve (peak to trough in dollars)
+        running_max = np.maximum.accumulate(pnl)
+        drawdowns = pnl - running_max
+        max_dd = drawdowns.min()
+
+        return {
+            'sharpe': ep.sharpe_ratio(returns),
+            'sortino': ep.sortino_ratio(returns),
+            'max_drawdown': max_dd,  # Dollar value, not percentage
+            'annual_return': ep.annual_return(returns),
+            'annual_volatility': ep.annual_volatility(returns),
+        }
+
     def summary(self) -> None:
         """Print backtest summary."""
         print('\n' + '=' * 60)
@@ -209,17 +237,43 @@ class BacktestRunner:
         print('=' * 60)
 
         total_pnl = 0.0
+        all_pnl_curves = []
+
         for sid, result in self.results.items():
+            pnl_curve = self.pnl_curves[sid]
+            metrics = self._compute_metrics(pnl_curve)
+
             print(f'\n{sid}:')
             print(f'  Trades:   {result.n_trades}')
             print(f'  Gross:    ${result.gross_pnl:,.2f}')
             print(f'  Costs:    ${result.costs:,.2f}')
             print(f'  Net PnL:  ${result.net_pnl:,.2f}')
-            total_pnl += result.net_pnl
 
-        print(f'\n{"=" * 60}')
-        print(f'TOTAL NET PnL: ${total_pnl:,.2f}')
-        print('=' * 60)
+            if metrics:
+                print(f'  Sharpe:   {metrics["sharpe"]:.2f}')
+                print(f'  Sortino:  {metrics["sortino"]:.2f}')
+                print(f'  Max DD:   ${metrics["max_drawdown"]:,.2f}')
+
+            total_pnl += result.net_pnl
+            all_pnl_curves.append(pnl_curve)
+
+        # Compute aggregate metrics
+        if all_pnl_curves:
+            min_len = min(len(c) for c in all_pnl_curves)
+            combined = np.sum([np.array(c[:min_len]) for c in all_pnl_curves], axis=0)
+            agg_metrics = self._compute_metrics(combined.tolist())
+
+            print(f'\n{"=" * 60}')
+            print(f'TOTAL NET PnL: ${total_pnl:,.2f}')
+            if agg_metrics:
+                print(f'Sharpe:        {agg_metrics["sharpe"]:.2f}')
+                print(f'Sortino:       {agg_metrics["sortino"]:.2f}')
+                print(f'Max Drawdown:  ${agg_metrics["max_drawdown"]:,.2f}')
+            print('=' * 60)
+        else:
+            print(f'\n{"=" * 60}')
+            print(f'TOTAL NET PnL: ${total_pnl:,.2f}')
+            print('=' * 60)
 
 
 def main() -> None:
@@ -311,7 +365,6 @@ def main() -> None:
 
     # Print debug stats
     if args.debug:
-        import numpy as np
         print('\n' + '=' * 60)
         print('DEBUG: Signal Statistics')
         print('=' * 60)
