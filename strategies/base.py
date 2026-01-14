@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from allocator import StrategySpec
 
 
 class RunningMean:
@@ -80,6 +85,14 @@ class SignalStrategy(ABC):
 
     def scale(self, orders: list[Order], reason: str = '') -> Signal:
         return Signal(self.strategy_id, 'scale', orders, reason)
+
+    def get_signal_spec(self, portfolio: dict, case: dict) -> StrategySpec | None:
+        """Return allocator input if strategy is active.
+
+        Override in subclasses to provide signal strength and position builder.
+        Returns None if strategy is not active (FLAT) or data is missing.
+        """
+        return None
 
 
 class SpreadStrategy(SignalStrategy):

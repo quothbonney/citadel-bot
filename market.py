@@ -19,6 +19,16 @@ class Market:
     gross_limit: float = 50_000_000.0
     net_limit: float = 10_000_000.0
 
+    # Max shares per ticker
+    max_shares: dict = field(default_factory=lambda: {
+        'IND': 200_000,
+        'AAA': 200_000,
+        'BBB': 200_000,
+        'CCC': 200_000,
+        'DDD': 200_000,
+        'ETF': 300_000,
+    })
+
     @property
     def all_tickers(self) -> tuple[str, ...]:
         return self.stocks + (self.etf, self.index)

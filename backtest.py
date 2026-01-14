@@ -80,6 +80,12 @@ class BacktestRunner:
         for strategy in self.runner.strategies:
             self.pnl_curves[strategy.strategy_id] = []
 
+        # Add allocator tracking if enabled
+        if self.runner.allocator:
+            self.positions['allocator'] = {}
+            self.results['allocator'] = BacktestResult('allocator')
+            self.pnl_curves['allocator'] = []
+
     def _get_price(self, portfolio: dict, ticker: str, side: str) -> float:
         """Get execution price (bid for sell, ask for buy)."""
         sec = portfolio.get(ticker, {})
@@ -90,7 +96,11 @@ class BacktestRunner:
     def _simulate_fill(self, strategy_id: str, portfolio: dict, order, debug: bool = False) -> float:
         """Simulate order fill and return cost (half-spread)."""
         ticker = order.ticker
-        qty = round(order.quantity * self.scale)  # Scale up and round
+        # Allocator already generates absolute sizes; don't scale again
+        if strategy_id == 'allocator':
+            qty = round(order.quantity)
+        else:
+            qty = round(order.quantity * self.scale)  # Scale up for strategy orders
         side = order.side
 
         # Get position
@@ -323,6 +333,12 @@ def main() -> None:
     for tick in session.ticks():
         portfolio = tick.securities
         case = {'period': tick.period, 'tick': tick.tick, 'status': 'ACTIVE'}
+
+        # Inject tracked positions into portfolio for allocator
+        if bt.runner.allocator and 'allocator' in bt.positions:
+            for ticker, pos in bt.positions['allocator'].items():
+                if ticker in portfolio:
+                    portfolio[ticker]['position'] = pos.quantity
 
         # Collect debug info before processing
         if args.debug:

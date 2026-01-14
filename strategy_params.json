@@ -1,4 +1,19 @@
 {
+  "allocator": {
+    "gross_limit": 50000000,
+    "net_limit": 10000000,
+    "max_shares": {
+      "IND": 200000,
+      "AAA": 200000,
+      "BBB": 200000,
+      "CCC": 200000,
+      "DDD": 200000,
+      "ETF": 300000
+    },
+    "turnover_k": 50000,
+    "net_mode": "signal",
+    "enabled": true
+  },
   "strategies": [
     {
       "type": "etf_nav",

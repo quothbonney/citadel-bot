@@ -66,12 +66,24 @@ class EtfNavParams:
         return 'etf_nav'
 
 
+@dataclass(frozen=True)
+class AllocatorConfig:
+    """Portfolio allocator configuration."""
+    gross_limit: float = 50_000_000.0
+    net_limit: float = 10_000_000.0
+    max_shares: dict[str, int] | None = None
+    turnover_k: float = 50_000.0
+    net_mode: str = 'signal'
+    enabled: bool = True
+
+
 @dataclass
 class StrategyParams:
     """All strategy parameters loaded from config."""
     pair_coint: list[PairCointParams]
     etf_nav: EtfNavParams | None
     width: dict[str, float]  # Bid-ask spreads per ticker
+    allocator: AllocatorConfig | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> 'StrategyParams':
@@ -96,10 +108,24 @@ class StrategyParams:
                     enabled=s.get('enabled', True),
                 )
 
+        # Parse allocator config
+        allocator = None
+        if 'allocator' in data:
+            a = data['allocator']
+            allocator = AllocatorConfig(
+                gross_limit=a.get('gross_limit', 50_000_000.0),
+                net_limit=a.get('net_limit', 10_000_000.0),
+                max_shares=a.get('max_shares'),
+                turnover_k=a.get('turnover_k', 50_000.0),
+                net_mode=a.get('net_mode', 'signal'),
+                enabled=a.get('enabled', True),
+            )
+
         return cls(
             pair_coint=pair_coint,
             etf_nav=etf_nav,
             width=data.get('width', {}),
+            allocator=allocator,
         )
 
     @classmethod

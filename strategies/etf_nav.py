@@ -1,7 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from params import EtfNavParams
 from market import Market, market
 from .base import SpreadStrategy, Signal, Order, PositionState, get_mid
 from .pyramid import PyramidMixin
+
+if TYPE_CHECKING:
+    from allocator import StrategySpec
 
 
 class EtfNavStrategy(SpreadStrategy, PyramidMixin):
@@ -165,3 +172,35 @@ class EtfNavStrategy(SpreadStrategy, PyramidMixin):
 
     def format_hold_reason(self, spread_adj: float) -> str:
         return f'spread_adj={spread_adj:.4f} size={self._current_size}'
+
+    # --- Allocator integration ---
+
+    def get_signal_spec(self, portfolio: dict, case: dict) -> StrategySpec | None:
+        """Return allocator input if strategy is active."""
+        if self.state == PositionState.FLAT:
+            return None  # Not active
+
+        raw = self.compute_spread(portfolio, case)
+        if raw is None:
+            return None
+
+        spread_adj = self._adjust_for_seasonality(raw, case)
+
+        from allocator import StrategySpec
+        return StrategySpec(
+            name='ETF-NAV',
+            signal=spread_adj,  # + = ETF overvalued = short spread
+            sigma=self.params.pyramid.first_entry,
+            build_pos=self._build_pos_per_unit,
+        )
+
+    def _build_pos_per_unit(self, prices: dict) -> dict:
+        """Position for +1 unit of short spread (sell ETF, buy stocks)."""
+        return {
+            'ETF': -1.0,
+            'AAA': 0.25,
+            'BBB': 0.25,
+            'CCC': 0.25,
+            'DDD': 0.25,
+            'IND': 0.0,
+        }

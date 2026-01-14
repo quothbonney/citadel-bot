@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING
 
 from params import PairCointParams
 from .base import SpreadStrategy, Signal, Order, PositionState, get_mid
 from .pyramid import PyramidMixin
+
+if TYPE_CHECKING:
+    from allocator import StrategySpec
 
 
 class PairCointStrategy(SpreadStrategy, PyramidMixin):
@@ -178,3 +184,32 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
 
     def on_exit(self) -> None:
         self._entry_hb = 0.0
+
+    # --- Allocator integration ---
+
+    def get_signal_spec(self, portfolio: dict, case: dict) -> StrategySpec | None:
+        """Return allocator input if strategy is active."""
+        if self.state == PositionState.FLAT:
+            return None  # Not active
+
+        raw = self.compute_spread(portfolio, case)
+        if raw is None:
+            return None
+
+        spread_adj = self._adjust_for_seasonality(raw, case)
+
+        from allocator import StrategySpec
+        return StrategySpec(
+            name=self.strategy_id,
+            signal=spread_adj * self._price_a,  # Dollarized z-score
+            sigma=self.params.pyramid.first_entry,
+            build_pos=lambda prices: self._build_pos_per_unit(prices),
+        )
+
+    def _build_pos_per_unit(self, prices: dict) -> dict:
+        """Position for +1 unit of short spread (a overvalued: sell a, buy b)."""
+        a, b = self.params.a, self.params.b
+        pa = prices.get(a, self._price_a)
+        pb = prices.get(b, self._price_b)
+        hb = self.params.beta * (pa / pb) if pb > 0 else self._current_hb
+        return {a: -1.0, b: +hb}
