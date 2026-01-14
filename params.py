@@ -5,6 +5,40 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PyramidParams:
+    """Level-based entry/exit configuration for spread strategies."""
+    entry_levels: tuple[float, ...]   # Spread thresholds for entering/scaling
+    entry_sizes: tuple[int, ...]      # Size to add at each level
+    exit_levels: tuple[float, ...]    # Spread thresholds for exiting
+    stop_loss: float | None = None    # Hard stop if |spread| exceeds this
+
+    @property
+    def max_level(self) -> int:
+        """Number of entry levels."""
+        return len(self.entry_levels)
+
+    @property
+    def total_size(self) -> int:
+        """Total position size when fully scaled."""
+        return sum(self.entry_sizes)
+
+    @property
+    def first_entry(self) -> float:
+        """First entry threshold."""
+        return self.entry_levels[0]
+
+
+def _parse_pyramid(data: dict) -> PyramidParams:
+    """Parse pyramid config from dict."""
+    return PyramidParams(
+        entry_levels=tuple(data['entry_levels']),
+        entry_sizes=tuple(data['entry_sizes']),
+        exit_levels=tuple(data['exit_levels']),
+        stop_loss=data.get('stop_loss'),
+    )
+
+
+@dataclass(frozen=True)
 class PairCointParams:
     """Parameters for a pair cointegration strategy."""
     a: str  # Long leg ticker
@@ -12,43 +46,24 @@ class PairCointParams:
     c: float  # Intercept from regression
     beta: float  # Cointegration coefficient
     std: float  # Standard deviation of z
-    entry_std: float | None = None  # Entry when |z| > entry_std * std (std mode)
-    entry_abs: float | None = None  # Entry when |z * price_a| > entry_abs (dollar mode)
+    pyramid: PyramidParams  # Entry/exit levels and sizes
     enabled: bool = True
 
     @property
     def strategy_id(self) -> str:
         return f'pair_{self.a}_{self.b}'
 
-    @property
-    def use_std_mode(self) -> bool:
-        """True if using std-based entry, False if using absolute dollar entry."""
-        return self.entry_std is not None
-
 
 @dataclass(frozen=True)
 class EtfNavParams:
-    """Parameters for ETF-NAV arbitrage strategy with pyramiding."""
-    entry_levels: tuple[float, ...]  # Spread thresholds for entry/scale-up
-    entry_sizes: tuple[int, ...]  # Size to add at each entry level
-    exit_levels: tuple[float, ...]  # Spread thresholds for exit (approach 0)
-    stop_loss: float | None = None  # Hard stop if |spread| exceeds this
+    """Parameters for ETF-NAV arbitrage strategy."""
+    pyramid: PyramidParams  # Entry/exit levels and sizes
     eod_flat: bool = False  # Flatten at end of day (tick 390)
     enabled: bool = True
 
     @property
     def strategy_id(self) -> str:
         return 'etf_nav'
-
-    @property
-    def max_level(self) -> int:
-        """Total levels (number of entry thresholds)."""
-        return len(self.entry_levels)
-
-    @property
-    def total_size(self) -> int:
-        """Total position size when fully scaled."""
-        return sum(self.entry_sizes)
 
 
 @dataclass
@@ -71,16 +86,12 @@ class StrategyParams:
                     c=s['c'],
                     beta=s['beta'],
                     std=s['std'],
-                    entry_std=s.get('entry_std'),  # None if not specified
-                    entry_abs=s.get('entry_abs'),  # None if not specified
+                    pyramid=_parse_pyramid(s['pyramid']),
                     enabled=s.get('enabled', True),
                 ))
             elif s.get('type') == 'etf_nav':
                 etf_nav = EtfNavParams(
-                    entry_levels=tuple(s['entry_levels']),
-                    entry_sizes=tuple(s['entry_sizes']),
-                    exit_levels=tuple(s['exit_levels']),
-                    stop_loss=s.get('stop_loss'),
+                    pyramid=_parse_pyramid(s['pyramid']),
                     eod_flat=s.get('eod_flat', False),
                     enabled=s.get('enabled', True),
                 )

@@ -1,9 +1,10 @@
 from params import EtfNavParams
 from market import Market, market
 from .base import SpreadStrategy, Signal, Order, PositionState, get_mid
+from .pyramid import PyramidMixin
 
 
-class EtfNavStrategy(SpreadStrategy):
+class EtfNavStrategy(SpreadStrategy, PyramidMixin):
     """
     ETF-NAV arbitrage strategy with pyramiding and risk management.
 
@@ -23,10 +24,8 @@ class EtfNavStrategy(SpreadStrategy):
         self._etf_mid: float = 0.0
         self._stock_mids: dict[str, float] = {}
 
-        # Pyramid state
-        self._triggered_levels: list[bool] = [False] * len(params.entry_levels)
-        self._current_size: int = 0  # Total units currently held
-        self._hold_ticks: int = 0
+        # Initialize pyramid state from mixin
+        self._init_pyramid(params.pyramid)
         self._spread_adj: float = 0.0
 
     def compute_spread(self, portfolio: dict, case: dict) -> float | None:
@@ -60,95 +59,70 @@ class EtfNavStrategy(SpreadStrategy):
         self._spread_adj = spread_adj
         tick = case.get('tick', 0)
         abs_spread = abs(spread_adj)
+        pyramid = self.params.pyramid
 
         # --- Risk stops (check first, before any other logic) ---
         if self.state != PositionState.FLAT:
             self._hold_ticks += 1
 
-            # Stop loss
-            if self.params.stop_loss is not None and abs_spread >= self.params.stop_loss:
+            # Stop loss (from mixin)
+            if self._check_stop_loss(abs_spread, pyramid):
                 return self._exit_position(f'stop_loss hit: {spread_adj:.4f}')
 
-            # EOD flat
+            # EOD flat (ETF-NAV specific)
             if self.params.eod_flat and tick >= 390:
                 return self._exit_position(f'eod_flat: tick={tick}')
 
         # --- Entry/Scale logic ---
         if self.state == PositionState.FLAT:
-            # Check first entry level
-            first_level = self.params.entry_levels[0]
+            first_level = pyramid.first_entry
             if spread_adj >= first_level:
                 # ETF overvalued: short spread
                 self.state = PositionState.SHORT
-                return self._enter_at_level(0, is_long=False, spread_adj=spread_adj)
+                size = self._enter_at_level(0, pyramid)
+                orders = self._make_orders(is_long=False, quantity=size)
+                return self.enter_short(orders, f'spread_adj={spread_adj:.4f} lvl=0 size={size}')
             elif spread_adj <= -first_level:
                 # ETF undervalued: long spread
                 self.state = PositionState.LONG
-                return self._enter_at_level(0, is_long=True, spread_adj=spread_adj)
+                size = self._enter_at_level(0, pyramid)
+                orders = self._make_orders(is_long=True, quantity=size)
+                return self.enter_long(orders, f'spread_adj={spread_adj:.4f} lvl=0 size={size}')
 
         elif self.state == PositionState.LONG:
-            # Check scale-up (spread getting more negative)
-            scale_signal = self._check_scale_up(abs_spread, is_long=True)
-            if scale_signal is not None:
-                return scale_signal
+            # Check scale-up (from mixin)
+            scale_result = self._check_scale_up(abs_spread, pyramid)
+            if scale_result is not None:
+                lvl, size = scale_result
+                orders = self._make_orders(is_long=True, quantity=size)
+                return self.scale(orders, f'scale lvl={lvl} size+={size} total={self._current_size}')
 
-            # Check exit levels (spread approaching 0)
-            exit_signal = self._check_exit(spread_adj, is_long=True)
-            if exit_signal is not None:
-                return exit_signal
+            # Check exit levels (from mixin)
+            exit_level = self._check_exit(spread_adj, pyramid, is_long=True)
+            if exit_level is not None:
+                return self._exit_position(f'exit_level {exit_level}: spread={spread_adj:.4f}')
 
         elif self.state == PositionState.SHORT:
-            # Check scale-up (spread getting more positive)
-            scale_signal = self._check_scale_up(abs_spread, is_long=False)
-            if scale_signal is not None:
-                return scale_signal
+            # Check scale-up (from mixin)
+            scale_result = self._check_scale_up(abs_spread, pyramid)
+            if scale_result is not None:
+                lvl, size = scale_result
+                orders = self._make_orders(is_long=False, quantity=size)
+                return self.scale(orders, f'scale lvl={lvl} size+={size} total={self._current_size}')
 
-            # Check exit levels (spread approaching 0)
-            exit_signal = self._check_exit(spread_adj, is_long=False)
-            if exit_signal is not None:
-                return exit_signal
+            # Check exit levels (from mixin)
+            exit_level = self._check_exit(spread_adj, pyramid, is_long=False)
+            if exit_level is not None:
+                return self._exit_position(f'exit_level {exit_level}: spread={spread_adj:.4f}')
 
         return self.hold(f'spread_adj={spread_adj:.4f} size={self._current_size}')
-
-    def _enter_at_level(self, level_idx: int, is_long: bool, spread_adj: float) -> Signal:
-        """Enter position at a specific level."""
-        size = self.params.entry_sizes[level_idx]
-        self._triggered_levels[level_idx] = True
-        self._current_size = size
-        self._hold_ticks = 0
-        orders = self._make_orders(is_long=is_long, quantity=size)
-        return self.enter_long(orders, f'spread_adj={spread_adj:.4f} lvl=0 size={size}') if is_long \
-            else self.enter_short(orders, f'spread_adj={spread_adj:.4f} lvl=0 size={size}')
-
-    def _check_scale_up(self, abs_spread: float, is_long: bool) -> Signal | None:
-        """Check if we should scale up at the next entry level."""
-        for i, (level, size) in enumerate(zip(self.params.entry_levels, self.params.entry_sizes)):
-            if not self._triggered_levels[i] and abs_spread >= level:
-                self._triggered_levels[i] = True
-                self._current_size += size
-                orders = self._make_orders(is_long=is_long, quantity=size)
-                return self.scale(orders, f'scale lvl={i} size+={size} total={self._current_size}')
-        return None
-
-    def _check_exit(self, spread_adj: float, is_long: bool) -> Signal | None:
-        """Check if spread has crossed an exit level."""
-        # For long: spread was negative, exit when it crosses towards 0
-        # For short: spread was positive, exit when it crosses towards 0
-        for exit_level in self.params.exit_levels:
-            if is_long and spread_adj >= exit_level:
-                return self._exit_position(f'exit_level {exit_level}: spread={spread_adj:.4f}')
-            elif not is_long and spread_adj <= exit_level:
-                return self._exit_position(f'exit_level {exit_level}: spread={spread_adj:.4f}')
-        return None
 
     def _exit_position(self, reason: str) -> Signal:
         """Exit entire position and reset state."""
         is_long = self.state == PositionState.LONG
         orders = self._make_orders(is_long=not is_long, quantity=self._current_size)
         self.state = PositionState.FLAT
-        self._triggered_levels = [False] * len(self.params.entry_levels)
-        self._current_size = 0
-        self._hold_ticks = 0
+        self._reset_pyramid(self.params.pyramid)
         return self.exit(orders, reason)
 
     def _make_orders(self, is_long: bool, quantity: float) -> list[Order]:
@@ -175,13 +149,13 @@ class EtfNavStrategy(SpreadStrategy):
     # --- Required abstract methods (delegated to _make_orders) ---
 
     def check_entry_long(self, spread_adj: float) -> bool:
-        return spread_adj <= -self.params.entry_levels[0]
+        return spread_adj <= -self.params.pyramid.first_entry
 
     def check_entry_short(self, spread_adj: float) -> bool:
-        return spread_adj >= self.params.entry_levels[0]
+        return spread_adj >= self.params.pyramid.first_entry
 
     def make_entry_orders(self, portfolio: dict, is_long: bool) -> list[Order]:
-        return self._make_orders(is_long=is_long, quantity=self.params.entry_sizes[0])
+        return self._make_orders(is_long=is_long, quantity=self.params.pyramid.entry_sizes[0])
 
     def make_exit_orders(self, portfolio: dict, is_long: bool) -> list[Order]:
         return self._make_orders(is_long=not is_long, quantity=self._current_size)
