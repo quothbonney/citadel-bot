@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""
+Backtest strategies using stalker-recorded session data.
+
+Usage:
+    python backtest.py /path/to/session/dir
+    python backtest.py  # Uses default session
+"""
+
+import argparse
+import logging
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from log_config import init_logging
+from market import market
+from params import StrategyParams, DEFAULT_PARAMS_PATH
+from runner import StrategyRunner
+from sizer import FixedSizer
+from stalker import SessionLoader
+
+
+@dataclass
+class BacktestResult:
+    """Results from backtesting a strategy."""
+    strategy_id: str
+    n_trades: int = 0
+    gross_pnl: float = 0.0
+    costs: float = 0.0
+    net_pnl: float = 0.0
+    wins: int = 0
+    losses: int = 0
+
+    @property
+    def win_rate(self) -> float:
+        total = self.wins + self.losses
+        return self.wins / total if total > 0 else 0.0
+
+
+@dataclass
+class Position:
+    """Track position for PnL calculation."""
+    ticker: str
+    quantity: int = 0
+    avg_price: float = 0.0
+    realized_pnl: float = 0.0
+
+
+class BacktestRunner:
+    """Run strategies on historical data and track simulated PnL."""
+
+    def __init__(self, params: StrategyParams, scale: int = 1) -> None:
+        self.params = params
+        self.scale = scale
+        self.sizer = FixedSizer(scale)
+        self.runner = StrategyRunner(
+            client=None,  # No live execution
+            params=params,
+            mkt=market,
+            sizer=self.sizer,
+            dry_run=True,
+        )
+
+        # Track positions per strategy
+        self.positions: dict[str, dict[str, Position]] = {}
+        for strategy in self.runner.strategies:
+            self.positions[strategy.strategy_id] = {}
+
+        # Track results
+        self.results: dict[str, BacktestResult] = {}
+        for strategy in self.runner.strategies:
+            self.results[strategy.strategy_id] = BacktestResult(strategy.strategy_id)
+
+        # PnL curves
+        self.pnl_curves: dict[str, list[float]] = {}
+        for strategy in self.runner.strategies:
+            self.pnl_curves[strategy.strategy_id] = []
+
+    def _get_price(self, portfolio: dict, ticker: str, side: str) -> float:
+        """Get execution price (bid for sell, ask for buy)."""
+        sec = portfolio.get(ticker, {})
+        if side == 'BUY':
+            return sec.get('ask', sec.get('last', 0))
+        return sec.get('bid', sec.get('last', 0))
+
+    def _simulate_fill(self, strategy_id: str, portfolio: dict, order, debug: bool = False) -> float:
+        """Simulate order fill and return cost (half-spread)."""
+        ticker = order.ticker
+        qty = round(order.quantity * self.scale)  # Scale up and round
+        side = order.side
+
+        # Get position
+        if ticker not in self.positions[strategy_id]:
+            self.positions[strategy_id][ticker] = Position(ticker)
+        pos = self.positions[strategy_id][ticker]
+
+        # Get fill price
+        price = self._get_price(portfolio, ticker, side)
+        if price <= 0:
+            return 0.0
+
+        if debug:
+            print(f'  FILL: {side} {qty} {ticker} @ {price:.2f}')
+            print(f'    pos before: qty={pos.quantity}, avg={pos.avg_price:.2f}, realized={pos.realized_pnl:.2f}')
+
+        # Half-spread cost
+        sec = portfolio.get(ticker, {})
+        bid = sec.get('bid', 0)
+        ask = sec.get('ask', 0)
+        spread = (ask - bid) if bid and ask else 0
+        cost = (spread / 2) * qty
+
+        # Update position
+        if side == 'BUY':
+            if pos.quantity >= 0:
+                # Adding to long
+                total_cost = pos.avg_price * pos.quantity + price * qty
+                pos.quantity += qty
+                pos.avg_price = total_cost / pos.quantity if pos.quantity else 0
+            else:
+                # Closing short
+                pnl = (pos.avg_price - price) * min(qty, -pos.quantity)
+                pos.realized_pnl += pnl
+                pos.quantity += qty
+                if pos.quantity > 0:
+                    pos.avg_price = price
+        else:  # SELL
+            if pos.quantity <= 0:
+                # Adding to short
+                total_cost = pos.avg_price * (-pos.quantity) + price * qty
+                pos.quantity -= qty
+                pos.avg_price = total_cost / (-pos.quantity) if pos.quantity else 0
+            else:
+                # Closing long
+                pnl = (price - pos.avg_price) * min(qty, pos.quantity)
+                pos.realized_pnl += pnl
+                pos.quantity -= qty
+                if pos.quantity < 0:
+                    pos.avg_price = price
+
+        if debug:
+            print(f'    pos after:  qty={pos.quantity}, avg={pos.avg_price:.2f}, realized={pos.realized_pnl:.2f}')
+
+        return cost
+
+    def _compute_unrealized_pnl(self, strategy_id: str, portfolio: dict) -> float:
+        """Compute unrealized PnL for a strategy."""
+        unrealized = 0.0
+        for ticker, pos in self.positions[strategy_id].items():
+            if pos.quantity == 0:
+                continue
+            sec = portfolio.get(ticker, {})
+            bid = sec.get('bid', 0)
+            ask = sec.get('ask', 0)
+            mid = (bid + ask) / 2 if bid and ask else sec.get('last', 0)
+            if pos.quantity > 0:
+                unrealized += (mid - pos.avg_price) * pos.quantity
+            else:
+                unrealized += (pos.avg_price - mid) * (-pos.quantity)
+        return unrealized
+
+    def process_tick(self, portfolio: dict, case: dict, tick_num: int = 0, trace_first_n: int = 0) -> list:
+        """Process one tick through all strategies."""
+        signals = self.runner.on_tick(portfolio, case)
+
+        for signal in signals:
+            sid = signal.strategy_id
+            result = self.results[sid]
+
+            # Enable debug for first N trades of specified strategy
+            debug = (trace_first_n > 0 and
+                     signal.action != 'hold' and
+                     result.n_trades < trace_first_n)
+
+            if debug:
+                print(f'\n=== TICK {tick_num}: {sid} {signal.action} ===')
+                print(f'  reason: {signal.reason}')
+
+            if signal.action in ('enter_long', 'enter_short'):
+                result.n_trades += 1
+
+            # Simulate fills
+            tick_cost = 0.0
+            for order in signal.orders:
+                cost = self._simulate_fill(sid, portfolio, order, debug=debug)
+                tick_cost += cost
+
+            result.costs += tick_cost
+
+            # Compute total PnL
+            realized = sum(p.realized_pnl for p in self.positions[sid].values())
+            unrealized = self._compute_unrealized_pnl(sid, portfolio)
+            result.gross_pnl = realized + unrealized
+            result.net_pnl = result.gross_pnl - result.costs
+
+            if debug:
+                print(f'  realized={realized:.2f}, unrealized={unrealized:.2f}')
+                print(f'  gross={result.gross_pnl:.2f}, costs={result.costs:.2f}, net={result.net_pnl:.2f}')
+
+            self.pnl_curves[sid].append(result.net_pnl)
+
+        return signals
+
+    def summary(self) -> None:
+        """Print backtest summary."""
+        print('\n' + '=' * 60)
+        print('BACKTEST RESULTS')
+        print('=' * 60)
+
+        total_pnl = 0.0
+        for sid, result in self.results.items():
+            print(f'\n{sid}:')
+            print(f'  Trades:   {result.n_trades}')
+            print(f'  Gross:    ${result.gross_pnl:,.2f}')
+            print(f'  Costs:    ${result.costs:,.2f}')
+            print(f'  Net PnL:  ${result.net_pnl:,.2f}')
+            total_pnl += result.net_pnl
+
+        print(f'\n{"=" * 60}')
+        print(f'TOTAL NET PnL: ${total_pnl:,.2f}')
+        print('=' * 60)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Backtest strategies on recorded data')
+    parser.add_argument('session', nargs='?', help='Path to stalker session directory')
+    parser.add_argument('--params', '-p', default=str(DEFAULT_PARAMS_PATH), help='Strategy params file')
+    parser.add_argument('--scale', '-s', type=int, default=1000, help='Position size multiplier')
+    parser.add_argument('--verbose', '-v', action='store_true')
+    parser.add_argument('--debug', '-d', action='store_true', help='Print debug info for signals')
+    parser.add_argument('--trace', '-t', type=int, default=0, help='Trace first N trades of pair_BBB_DDD')
+    args = parser.parse_args()
+
+    init_logging(console_level='DEBUG' if args.verbose else 'WARNING')
+
+    # Default session path
+    if args.session:
+        session_path = Path(args.session)
+    else:
+        session_path = Path('/Users/wudd/Downloads/data/20260114_182237_Citadel_Securities_Quant_Invitational_2025_Trading_Competition')
+
+    if not session_path.exists():
+        print(f'Session not found: {session_path}')
+        sys.exit(1)
+
+    # Load session
+    print(f'Loading session: {session_path.name}')
+    session = SessionLoader(session_path)
+    print(f'Case: {session.case.get("name")}')
+    print(f'Tickers: {session.tickers}')
+
+    # Load params
+    params = StrategyParams.load(args.params)
+    print(f'Strategies: {len(params.pair_coint)} pair + {"1 ETF-NAV" if params.etf_nav else "0 ETF-NAV"}')
+    print(f'Scale: {args.scale}x')
+
+    # Run backtest
+    bt = BacktestRunner(params, scale=args.scale)
+
+    # Debug: collect stats
+    debug_data = {
+        'pair_BBB_DDD': {'z': [], 'z_adj': [], 'dollar_mag': [], 'entries': [], 'exits': []},
+        'pair_AAA_DDD': {'z': [], 'z_adj': [], 'dollar_mag': [], 'entries': [], 'exits': []},
+        'etf_nav': {'spread': [], 'spread_adj': [], 'entries': [], 'exits': []},
+    }
+
+    tick_count = 0
+    for tick in session.ticks():
+        portfolio = tick.securities
+        case = {'period': tick.period, 'tick': tick.tick, 'status': 'ACTIVE'}
+
+        # Collect debug info before processing
+        if args.debug:
+            import math
+            # BBB-DDD
+            p = params.pair_coint[0]  # BBB-DDD
+            price_a = (portfolio['BBB']['bid'] + portfolio['BBB']['ask']) / 2
+            price_b = (portfolio['DDD']['bid'] + portfolio['DDD']['ask']) / 2
+            z = math.log(price_a) - (p.c + p.beta * math.log(price_b))
+            debug_data['pair_BBB_DDD']['z'].append(z)
+
+            # AAA-DDD
+            p2 = params.pair_coint[1]  # AAA-DDD
+            price_a2 = (portfolio['AAA']['bid'] + portfolio['AAA']['ask']) / 2
+            z2 = math.log(price_a2) - (p2.c + p2.beta * math.log(price_b))
+            debug_data['pair_AAA_DDD']['z'].append(z2)
+
+            # ETF-NAV
+            etf_mid = (portfolio['ETF']['bid'] + portfolio['ETF']['ask']) / 2
+            nav = sum((portfolio[s]['bid'] + portfolio[s]['ask']) / 2 for s in ['AAA', 'BBB', 'CCC', 'DDD']) / 4
+            spread = etf_mid - nav
+            debug_data['etf_nav']['spread'].append(spread)
+
+        signals = bt.process_tick(portfolio, case, tick_num=tick_count, trace_first_n=args.trace)
+
+        # Track entries/exits
+        if args.debug:
+            for sig in signals:
+                if sig.action in ('enter_long', 'enter_short'):
+                    debug_data.get(sig.strategy_id, {}).get('entries', []).append((tick_count, sig.action, sig.reason))
+                elif sig.action == 'exit':
+                    debug_data.get(sig.strategy_id, {}).get('exits', []).append((tick_count, sig.reason))
+
+        tick_count += 1
+        if tick_count % 500 == 0:
+            print(f'Processed {tick_count} ticks...')
+
+    print(f'\nProcessed {tick_count} total ticks')
+    bt.summary()
+
+    # Print debug stats
+    if args.debug:
+        import numpy as np
+        print('\n' + '=' * 60)
+        print('DEBUG: Signal Statistics')
+        print('=' * 60)
+
+        for sid, data in debug_data.items():
+            print(f'\n{sid}:')
+            if 'z' in data and data['z']:
+                z_arr = np.array(data['z'])
+                print(f'  z:        mean={z_arr.mean():.6f}  std={z_arr.std():.6f}  min={z_arr.min():.6f}  max={z_arr.max():.6f}')
+            if 'spread' in data and data['spread']:
+                s_arr = np.array(data['spread'])
+                print(f'  spread:   mean={s_arr.mean():.4f}  std={s_arr.std():.4f}  min={s_arr.min():.4f}  max={s_arr.max():.4f}')
+            print(f'  entries:  {len(data.get("entries", []))}')
+            print(f'  exits:    {len(data.get("exits", []))}')
+
+            # Show first few entries
+            if data.get('entries'):
+                print(f'  first 5 entries:')
+                for i, (t, action, reason) in enumerate(data['entries'][:5]):
+                    print(f'    tick {t}: {action} - {reason}')
+
+
+if __name__ == '__main__':
+    main()

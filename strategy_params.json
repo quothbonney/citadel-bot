@@ -1,0 +1,37 @@
+{
+  "strategies": [
+    {
+      "type": "etf_nav",
+      "entry_abs": 0.12,
+      "enabled": true
+    },
+    {
+      "type": "pair_coint",
+      "a": "BBB",
+      "b": "DDD",
+      "c": 1.587696,
+      "beta": 0.8166319280179314,
+      "std": 0.008830,
+      "entry_abs": 0.12,
+      "enabled": true
+    },
+    {
+      "type": "pair_coint",
+      "a": "AAA",
+      "b": "DDD",
+      "c": 0.509616,
+      "beta": 0.961851,
+      "std": 0.010074,
+      "entry_abs": 0.12,
+      "enabled": true
+    }
+  ],
+  "width": {
+    "IND": 0.02,
+    "AAA": 0.04,
+    "BBB": 0.06,
+    "CCC": 0.04,
+    "DDD": 0.02,
+    "ETF": 0.04
+  }
+}
