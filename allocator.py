@@ -179,7 +179,9 @@ class PortfolioAllocator:
             cur = current.get(ticker, 0.0)
             delta = tgt - cur
 
-            if abs(delta) < 0.5:  # Skip tiny changes
+            # Skip small changes (dead band: 15% of current or 5000 shares minimum)
+            min_delta = max(5000, abs(cur) * 0.15)
+            if abs(delta) < min_delta:
                 continue
 
             qty = abs(round(delta))

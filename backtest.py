@@ -302,7 +302,7 @@ def main() -> None:
     if args.session:
         session_path = Path(args.session)
     else:
-        session_path = Path('/Users/wudd/Downloads/data/20260114_182237_Citadel_Securities_Quant_Invitational_2025_Trading_Competition')
+        session_path = Path('/Users/wudd/Downloads/20260114_182237_Citadel_Securities_Quant_Invitational_2025_Trading_Competition')
 
     if not session_path.exists():
         print(f'Session not found: {session_path}')
