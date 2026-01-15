@@ -183,10 +183,109 @@ def create_app(
 
     @app.route("/")
     def index():
-        return jsonify({
-            "status": "ok",
-            "endpoints": ["/health", "/positions", "/strategies"],
-        })
+        # Minimal inline dashboard: no templates, no bundlers, just fetch+render.
+        return (
+            """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Trading Dashboard</title>
+  <style>
+    body { font-family: monospace; margin: 20px; background: #0b0b0b; color: #ddd; }
+    h1, h2 { color: #eee; }
+    table { border-collapse: collapse; margin-bottom: 24px; width: 100%; }
+    th, td { border: 1px solid #444; padding: 6px 8px; text-align: left; }
+    th { background: #111; }
+    .ok { color: #7df57d; }
+    .warn { color: #f5d67d; }
+    .err { color: #f57d7d; }
+    code { color: #9cf; }
+  </style>
+</head>
+<body>
+  <h1>Trading Dashboard</h1>
+  <div id="status">Loading...</div>
+
+  <h2>Positions</h2>
+  <div id="positions"></div>
+
+  <h2>Strategies</h2>
+  <div id="strategies"></div>
+
+  <script>
+    async function fetchJson(path) {
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(path + " -> " + r.status);
+      return await r.json();
+    }
+
+    function renderPositions(data) {
+      const gross = data.gross_exposure.toFixed(2);
+      const net = data.net_exposure.toFixed(2);
+      const pnl = data.total_pnl.toFixed(2);
+      const rows = data.positions.map(p => `
+        <tr>
+          <td>${p.ticker}</td>
+          <td>${p.position}</td>
+          <td>${p.bid?.toFixed ? p.bid.toFixed(2) : p.bid}</td>
+          <td>${p.ask?.toFixed ? p.ask.toFixed(2) : p.ask}</td>
+          <td>${p.mid?.toFixed ? p.mid.toFixed(2) : p.mid}</td>
+          <td>${p.unrealized?.toFixed ? p.unrealized.toFixed(2) : p.unrealized}</td>
+          <td>${p.realized?.toFixed ? p.realized.toFixed(2) : p.realized}</td>
+        </tr>
+      `).join("");
+      return `
+        <div>Gross: <span class="${Math.abs(net) <= Math.abs(gross) ? 'ok' : 'warn'}">${gross}</span>
+             | Net: <span class="${Math.abs(net) < Math.abs(gross) ? 'ok' : 'warn'}">${net}</span>
+             | PnL: <span class="${pnl >= 0 ? 'ok' : 'err'}">${pnl}</span></div>
+        <table>
+          <thead><tr><th>Ticker</th><th>Pos</th><th>Bid</th><th>Ask</th><th>Mid</th><th>Unreal</th><th>Real</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    function renderStrategies(data) {
+      const rows = data.strategies.map(s => `
+        <tr>
+          <td>${s.strategy_id}</td>
+          <td>${s.state}</td>
+          <td>${s.action}</td>
+          <td>${s.spread === null ? "" : s.spread.toFixed ? s.spread.toFixed(4) : s.spread}</td>
+          <td>${s.expected_pnl === null ? "" : s.expected_pnl.toFixed ? s.expected_pnl.toFixed(2) : s.expected_pnl}</td>
+          <td>${s.reason}</td>
+        </tr>
+      `).join("");
+      return `
+        <div>Case: ${JSON.stringify(data.case)}</div>
+        <table>
+          <thead><tr><th>ID</th><th>State</th><th>Action</th><th>Spread</th><th>ExpPnL</th><th>Reason</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    async function refresh() {
+      try {
+        const [pos, strat] = await Promise.all([fetchJson("/positions"), fetchJson("/strategies")]);
+        document.getElementById("status").textContent = "OK";
+        document.getElementById("positions").innerHTML = renderPositions(pos);
+        document.getElementById("strategies").innerHTML = renderStrategies(strat);
+      } catch (e) {
+        document.getElementById("status").innerHTML = '<span class="err">' + e + '</span>';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
+            """,
+            200,
+            {"Content-Type": "text/html"},
+        )
 
     return app
 

@@ -110,11 +110,12 @@ def test_strategies_endpoint_reports_spread(client):
     assert "expected_pnl" in first
 
 
-def test_root_lists_endpoints(client):
+def test_root_serves_html_dashboard(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    payload = resp.get_json()
-    assert "/health" in payload["endpoints"]
-    assert "/positions" in payload["endpoints"]
-    assert "/strategies" in payload["endpoints"]
+    assert "text/html" in resp.content_type
+    body = resp.data.decode("utf-8")
+    assert "Trading Dashboard" in body
+    assert "/positions" in body
+    assert "/strategies" in body
 
