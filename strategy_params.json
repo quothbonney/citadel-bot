@@ -14,13 +14,14 @@
     "min_threshold": 0.03,
     "top_n": 4,
     "enabled": true,
-    "stop_loss_mult": 2.5,
-    "take_profit_mult": 0,
+    "stop_loss_z": 0.4,
+    "take_profit_z": 0.01,
     "max_hold_ticks": 500
   },
   "strategies": [
     {
       "type": "etf_nav",
+      "std": 0.05,
       "pyramid": {
         "entry_levels": [
           0.12,
@@ -161,7 +162,7 @@
         "exit_levels": [
           0.0
         ],
-        "stop_loss": null
+        "stop_loss": 0.3
       },
       "enabled": true
     }

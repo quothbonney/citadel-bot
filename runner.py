@@ -34,21 +34,11 @@ class StrategyRunner:
         # Initialize allocator if enabled
         self.allocator: PortfolioAllocator | None = None
         if params.allocator and params.allocator.enabled:
-            config = AllocatorConfig(
-                gross_limit=params.allocator.gross_limit,
-                net_limit=params.allocator.net_limit,
-                max_shares=params.allocator.max_shares or mkt.max_shares,
-                turnover_k=params.allocator.turnover_k,
-                min_threshold=params.allocator.min_threshold,
-                top_n=params.allocator.top_n,
-                stop_loss_mult=params.allocator.stop_loss_mult,
-                take_profit_mult=params.allocator.take_profit_mult,
-                max_hold_ticks=params.allocator.max_hold_ticks,
-            )
-            self.allocator = PortfolioAllocator(config, params.width)
-            logging.info('Allocator enabled: gross=$%.0fM min_thresh=%.2f top_n=%d SL=%.1fx TP=%.1fx max_hold=%d',
-                         config.gross_limit / 1e6, config.min_threshold, config.top_n,
-                         config.stop_loss_mult, config.take_profit_mult, config.max_hold_ticks)
+            # Use params directly - AllocatorConfig is now imported from params
+            self.allocator = PortfolioAllocator(params.allocator, params.width)
+            logging.info('Allocator enabled: gross=$%.0fM min_thresh=%.2f top_n=%d SL_z=%.2f TP_z=%.2f max_hold=%d',
+                         params.allocator.gross_limit / 1e6, params.allocator.min_threshold, params.allocator.top_n,
+                         params.allocator.stop_loss_z, params.allocator.take_profit_z, params.allocator.max_hold_ticks)
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -83,8 +73,10 @@ class StrategyRunner:
             delta = qty if order.side == 'BUY' else -qty
             positions[order.ticker] = positions.get(order.ticker, 0) + delta
 
-        # Check limits
-        ok, gross, net = self.market.check_limits(positions, prices)
+        # Check limits (use allocator config if available, else defaults)
+        gross_limit = self.params.allocator.gross_limit if self.params.allocator else 50_000_000.0
+        net_limit = self.params.allocator.net_limit if self.params.allocator else 10_000_000.0
+        ok, gross, net = self.market.check_limits(positions, prices, gross_limit, net_limit)
         if not ok:
             logging.warning(
                 'Risk limit exceeded for %s: gross=%.0f net=%.0f',

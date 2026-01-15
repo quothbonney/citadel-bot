@@ -5,10 +5,12 @@ top signals that exceed the minimum threshold.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 
 import numpy as np
+
+from params import AllocatorConfig
 
 if TYPE_CHECKING:
     from strategies.base import Order
@@ -35,25 +37,6 @@ class StrategySpec:
     def strength(self) -> float:
         """Signal strength for ranking."""
         return self.abs_signal / (self.sigma + 1e-9)
-
-
-@dataclass
-class AllocatorConfig:
-    """Allocator configuration."""
-    gross_limit: float = 50_000_000.0
-    net_limit: float = 10_000_000.0
-    max_shares: dict[str, int] = field(default_factory=lambda: {
-        'IND': 200_000, 'AAA': 200_000, 'BBB': 200_000,
-        'CCC': 200_000, 'DDD': 200_000, 'ETF': 300_000,
-    })
-    turnover_k: float = 50_000.0  # Max $ turnover per tick
-    min_threshold: float = 0.12   # Minimum |spread| to be considered
-    top_n: int = 4                # Max number of signals to allocate to
-
-    # Risk management
-    stop_loss_mult: float = 2.0      # Exit if |spread| exceeds entry * this (e.g., 2.0 = double)
-    take_profit_mult: float = 0.3    # Exit if |spread| drops to entry * this (e.g., 0.3 = 70% reversion)
-    max_hold_ticks: int = 300        # Force exit after this many ticks (~2.5 min at 0.5s poll)
 
 
 class PortfolioAllocator:
@@ -128,13 +111,13 @@ class PortfolioAllocator:
             # Current spread (same direction as entry)
             current_spread = spec.abs_signal
 
-            # Check stop loss: spread moved against us (got bigger)
-            if current_spread > entry_spread * self.config.stop_loss_mult:
+            # Check stop loss: spread exceeded absolute threshold
+            if current_spread > self.config.stop_loss_z:
                 forced_exits.add(name)
                 continue
 
-            # Check take profit: spread reverted enough
-            if current_spread < entry_spread * self.config.take_profit_mult:
+            # Check take profit: spread reverted near mean
+            if current_spread < self.config.take_profit_z:
                 forced_exits.add(name)
                 continue
 

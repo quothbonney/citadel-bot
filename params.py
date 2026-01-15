@@ -58,6 +58,7 @@ class PairCointParams:
 class EtfNavParams:
     """Parameters for ETF-NAV arbitrage strategy."""
     pyramid: PyramidParams  # Entry/exit levels and sizes
+    std: float = 0.05  # Volatility estimate for allocator sigma
     eod_flat: bool = False  # Flatten at end of day (tick 390)
     enabled: bool = True
 
@@ -66,7 +67,7 @@ class EtfNavParams:
         return 'etf_nav'
 
 
-@dataclass(frozen=True)
+@dataclass
 class AllocatorConfig:
     """Portfolio allocator configuration."""
     gross_limit: float = 50_000_000.0
@@ -76,9 +77,9 @@ class AllocatorConfig:
     min_threshold: float = 0.12  # Minimum |spread| to be considered
     top_n: int = 4  # Max signals to allocate to
     enabled: bool = True
-    # Risk management
-    stop_loss_mult: float = 2.0      # Exit if spread exceeds entry * this
-    take_profit_mult: float = 0.3    # Exit if spread drops to entry * this
+    # Risk management (absolute z-score thresholds)
+    stop_loss_z: float = 0.4         # Exit if |spread| exceeds this absolute threshold
+    take_profit_z: float = 0.02      # Exit if |spread| drops below this (near mean)
     max_hold_ticks: int = 300        # Force exit after this many ticks
 
 
@@ -109,6 +110,7 @@ class StrategyParams:
             elif s.get('type') == 'etf_nav':
                 etf_nav = EtfNavParams(
                     pyramid=_parse_pyramid(s['pyramid']),
+                    std=s.get('std', 0.05),
                     eod_flat=s.get('eod_flat', False),
                     enabled=s.get('enabled', True),
                 )
@@ -125,8 +127,8 @@ class StrategyParams:
                 min_threshold=a.get('min_threshold', 0.12),
                 top_n=a.get('top_n', 4),
                 enabled=a.get('enabled', True),
-                stop_loss_mult=a.get('stop_loss_mult', 2.0),
-                take_profit_mult=a.get('take_profit_mult', 0.3),
+                stop_loss_z=a.get('stop_loss_z', 0.4),
+                take_profit_z=a.get('take_profit_z', 0.02),
                 max_hold_ticks=a.get('max_hold_ticks', 300),
             )
 

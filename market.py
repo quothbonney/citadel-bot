@@ -1,9 +1,9 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class Market:
-    """Invariant market structure and constraints."""
+    """Invariant market structure (tickers only - limits in AllocatorConfig)."""
 
     # Underlying stocks
     stocks: tuple[str, ...] = ('AAA', 'BBB', 'CCC', 'DDD')
@@ -14,20 +14,6 @@ class Market:
 
     # Index ETF tracking top 100 stocks (includes our stocks)
     index: str = 'IND'
-
-    # Risk limits
-    gross_limit: float = 50_000_000.0
-    net_limit: float = 10_000_000.0
-
-    # Max shares per ticker
-    max_shares: dict = field(default_factory=lambda: {
-        'IND': 200_000,
-        'AAA': 200_000,
-        'BBB': 200_000,
-        'CCC': 200_000,
-        'DDD': 200_000,
-        'ETF': 300_000,
-    })
 
     @property
     def all_tickers(self) -> tuple[str, ...]:
@@ -45,11 +31,17 @@ class Market:
         """Sum of position values (longs and shorts net out)."""
         return sum(positions.get(t, 0) * prices.get(t, 0) for t in self.all_tickers)
 
-    def check_limits(self, positions: dict[str, float], prices: dict[str, float]) -> tuple[bool, float, float]:
+    def check_limits(
+        self,
+        positions: dict[str, float],
+        prices: dict[str, float],
+        gross_limit: float = 50_000_000.0,
+        net_limit: float = 10_000_000.0,
+    ) -> tuple[bool, float, float]:
         """Check if within risk limits. Returns (ok, gross, net)."""
         gross = self.gross_exposure(positions, prices)
         net = self.net_exposure(positions, prices)
-        ok = gross <= self.gross_limit and abs(net) <= self.net_limit
+        ok = gross <= gross_limit and abs(net) <= net_limit
         return ok, gross, net
 
 
