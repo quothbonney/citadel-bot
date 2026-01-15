@@ -119,7 +119,7 @@ def test_root_serves_html_dashboard(client):
     assert "Trading Dashboard" in body
     assert "/positions" in body
     assert "/strategies" in body
-    assert "Strength" in body
     assert "Sharpe" in body
-    assert "computeSharpe" in body
+    assert "computeCumulativeSharpe" in body
+    assert "active-summary" in body
 

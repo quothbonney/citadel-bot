@@ -210,20 +210,54 @@ def create_app(
   <meta charset="utf-8" />
   <title>Trading Dashboard</title>
   <style>
-    body { font-family: monospace; margin: 20px; background: #0b0b0b; color: #ddd; }
-    h1, h2 { color: #eee; }
-    table { border-collapse: collapse; margin-bottom: 24px; width: 100%; }
-    th, td { border: 1px solid #444; padding: 6px 8px; text-align: left; }
-    th { background: #111; }
-    .ok { color: #7df57d; }
-    .warn { color: #f5d67d; }
-    .err { color: #f57d7d; }
-    code { color: #9cf; }
+    * { box-sizing: border-box; }
+    body { font-family: 'Consolas', 'Monaco', monospace; margin: 0; padding: 20px; background: #0a0a0a; color: #ccc; }
+    h1 { color: #fff; margin: 0 0 10px 0; font-size: 1.4em; }
+    h2 { color: #888; margin: 20px 0 8px 0; font-size: 1em; text-transform: uppercase; letter-spacing: 1px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .card { background: #111; border: 1px solid #333; padding: 12px; border-radius: 4px; }
+    .stats { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; }
+    .stat { text-align: center; }
+    .stat-value { font-size: 1.4em; font-weight: bold; }
+    .stat-label { font-size: 0.75em; color: #666; text-transform: uppercase; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+    th, td { border: 1px solid #222; padding: 4px 8px; text-align: right; }
+    th { background: #1a1a1a; color: #888; font-weight: normal; text-transform: uppercase; font-size: 0.75em; }
+    td:first-child, th:first-child { text-align: left; }
+    .ok { color: #4f4; }
+    .warn { color: #fa0; }
+    .err { color: #f44; }
+    .active-row { background: #1a2a1a; }
+    .flat-row { opacity: 0.6; }
+    svg { display: block; width: 100%; height: 120px; }
+    .chart-container { margin-top: 8px; }
+    #status { font-size: 0.8em; color: #666; }
+    .case-info { font-size: 0.85em; color: #888; margin-bottom: 8px; }
+    .active-summary { background: #1a2a1a; border: 1px solid #2a4a2a; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
   </style>
 </head>
 <body>
-  <h1>Trading Dashboard</h1>
-  <div id="status">Loading...</div>
+  <h1>Trading Dashboard <span id="status">...</span></h1>
+  <div id="case-info" class="case-info"></div>
+  
+  <div id="active-summary" class="active-summary" style="display:none;"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Performance</h2>
+      <div id="performance-stats" class="stats"></div>
+      <div class="chart-container">
+        <svg id="pnl-chart" viewBox="0 0 400 120" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Exposure</h2>
+      <div id="exposure-stats" class="stats"></div>
+      <div class="chart-container">
+        <svg id="exposure-chart" viewBox="0 0 400 120" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
+  </div>
 
   <h2>Positions</h2>
   <div id="positions"></div>
@@ -232,8 +266,11 @@ def create_app(
   <div id="strategies"></div>
 
   <script>
-    const history = { t: [], gross: [], net: [], pnl: [], returns: [] };
-    const MAX_POINTS = 100;
+    // Keep ALL returns for cumulative Sharpe, but limit chart points
+    const allReturns = [];
+    const chartData = { pnl: [], gross: [], net: [] };
+    const CHART_POINTS = 60;
+    let startPnl = null;
 
     async function fetchJson(path) {
       const r = await fetch(path);
@@ -241,104 +278,187 @@ def create_app(
       return await r.json();
     }
 
-    function computeSharpe() {
-      if (history.returns.length < 2) return null;
-      const mean = history.returns.reduce((a, b) => a + b, 0) / history.returns.length;
-      const variance = history.returns.reduce((a, b) => a + (b - mean) ** 2, 0) / history.returns.length;
+    function computeCumulativeSharpe() {
+      if (allReturns.length < 5) return null;
+      const mean = allReturns.reduce((a, b) => a + b, 0) / allReturns.length;
+      const variance = allReturns.reduce((a, b) => a + (b - mean) ** 2, 0) / allReturns.length;
       const std = Math.sqrt(variance);
-      if (std === 0) return null;
-      // Annualize: assume 2s intervals, 252 trading days, 6.5 hours = 11700 2s intervals per year
-      const periodsPerYear = Math.sqrt(11700);
-      return (mean / std) * periodsPerYear;
+      if (std < 0.01) return null;
+      // Annualize: 2s intervals, ~11700 per trading year
+      return (mean / std) * Math.sqrt(11700);
     }
 
-    function renderPositions(data) {
-      const gross = data.gross_exposure.toFixed(2);
-      const net = data.net_exposure.toFixed(2);
-      const pnl = data.total_pnl.toFixed(2);
-      const sharpe = computeSharpe();
+    function fmt(n, decimals = 0) {
+      if (n === null || n === undefined) return "N/A";
+      if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + "M";
+      if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
+      return n.toFixed(decimals);
+    }
+
+    function makeStat(label, value, cls = "") {
+      return `<div class="stat"><div class="stat-value ${cls}">${value}</div><div class="stat-label">${label}</div></div>`;
+    }
+
+    function drawChart(svgId, data, color) {
+      const svg = document.getElementById(svgId);
+      if (!svg || data.length < 2) { svg.innerHTML = ''; return; }
+      
+      const min = Math.min(...data);
+      const max = Math.max(...data);
+      const range = max - min || 1;
+      const w = 400, h = 120, pad = 10;
+      
+      // Build path
+      const points = data.map((v, i) => {
+        const x = pad + (i / (data.length - 1)) * (w - 2 * pad);
+        const y = h - pad - ((v - min) / range) * (h - 2 * pad);
+        return `${x},${y}`;
+      });
+      
+      // Zero line position
+      const zeroY = h - pad - ((0 - min) / range) * (h - 2 * pad);
+      const showZero = min < 0 && max > 0;
+      
+      svg.innerHTML = `
+        ${showZero ? `<line x1="${pad}" y1="${zeroY}" x2="${w-pad}" y2="${zeroY}" stroke="#333" stroke-dasharray="4"/>` : ''}
+        <polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2"/>
+        <text x="${w-pad}" y="12" fill="#666" font-size="10" text-anchor="end">${fmt(max)}</text>
+        <text x="${w-pad}" y="${h-2}" fill="#666" font-size="10" text-anchor="end">${fmt(min)}</text>
+      `;
+    }
+
+    function renderPerformance(pnl) {
+      const sharpe = computeCumulativeSharpe();
       const sharpeStr = sharpe === null ? "N/A" : sharpe.toFixed(2);
       const sharpeClass = sharpe === null ? "" : sharpe > 2 ? "ok" : sharpe > 0 ? "warn" : "err";
       
-      const rows = data.positions.map(p => `
-        <tr>
+      const totalReturn = startPnl !== null ? pnl - startPnl : 0;
+      const returnClass = totalReturn >= 0 ? "ok" : "err";
+      
+      document.getElementById("performance-stats").innerHTML = 
+        makeStat("PnL", fmt(pnl), pnl >= 0 ? "ok" : "err") +
+        makeStat("Session +/-", fmt(totalReturn), returnClass) +
+        makeStat("Sharpe", sharpeStr, sharpeClass) +
+        makeStat("Samples", allReturns.length.toString());
+      
+      drawChart("pnl-chart", chartData.pnl, "#4f4");
+    }
+
+    function renderExposure(gross, net) {
+      const utilization = gross > 0 ? ((gross / 50e6) * 100).toFixed(1) + "%" : "0%";
+      const netPct = gross > 0 ? ((Math.abs(net) / gross) * 100).toFixed(0) + "%" : "0%";
+      
+      document.getElementById("exposure-stats").innerHTML = 
+        makeStat("Gross", fmt(gross), gross > 45e6 ? "warn" : "ok") +
+        makeStat("Net", fmt(net), Math.abs(net) > 8e6 ? "warn" : "") +
+        makeStat("Util", utilization) +
+        makeStat("Net/Gross", netPct);
+      
+      drawChart("exposure-chart", chartData.gross, "#48f");
+    }
+
+    function renderPositions(data) {
+      const rows = data.positions.map(p => {
+        const posClass = p.position !== 0 ? "active-row" : "";
+        const pnlClass = (p.unrealized + p.realized) >= 0 ? "ok" : "err";
+        return `
+        <tr class="${posClass}">
           <td>${p.ticker}</td>
-          <td>${p.position}</td>
-          <td>${p.bid?.toFixed ? p.bid.toFixed(2) : p.bid}</td>
-          <td>${p.ask?.toFixed ? p.ask.toFixed(2) : p.ask}</td>
-          <td>${p.mid?.toFixed ? p.mid.toFixed(2) : p.mid}</td>
-          <td>${p.unrealized?.toFixed ? p.unrealized.toFixed(2) : p.unrealized}</td>
-          <td>${p.realized?.toFixed ? p.realized.toFixed(2) : p.realized}</td>
-        </tr>
-      `).join("");
-      return `
-        <div>Gross: <span class="${Math.abs(net) <= Math.abs(gross) ? 'ok' : 'warn'}">${gross}</span>
-             | Net: <span class="${Math.abs(net) < Math.abs(gross) ? 'ok' : 'warn'}">${net}</span>
-             | PnL: <span class="${pnl >= 0 ? 'ok' : 'err'}">${pnl}</span>
-             | Sharpe: <span class="${sharpeClass}">${sharpeStr}</span></div>
+          <td>${p.position.toLocaleString()}</td>
+          <td>${p.bid.toFixed(2)}</td>
+          <td>${p.ask.toFixed(2)}</td>
+          <td>${(p.ask - p.bid).toFixed(3)}</td>
+          <td class="${pnlClass}">${fmt(p.unrealized + p.realized)}</td>
+        </tr>`;
+      }).join("");
+      document.getElementById("positions").innerHTML = `
         <table>
-          <thead><tr><th>Ticker</th><th>Pos</th><th>Bid</th><th>Ask</th><th>Mid</th><th>Unreal</th><th>Real</th></tr></thead>
+          <thead><tr><th>Ticker</th><th>Position</th><th>Bid</th><th>Ask</th><th>Spread</th><th>P&L</th></tr></thead>
           <tbody>${rows}</tbody>
-        </table>
-      `;
+        </table>`;
     }
 
     function renderStrategies(data) {
-      const rows = data.strategies.map(s => {
-        const strengthClass = s.strength !== null && s.strength > 1.0 ? 'warn' : '';
+      // Separate active (non-FLAT) from inactive
+      const active = data.strategies.filter(s => s.state !== "FLAT");
+      const inactive = data.strategies.filter(s => s.state === "FLAT");
+      
+      // Active summary at top
+      const summaryEl = document.getElementById("active-summary");
+      if (active.length > 0) {
+        const activeList = active.map(s => `<b>${s.strategy_id}</b> (${s.state}, z=${s.spread?.toFixed(3) || "?"})`).join(" | ");
+        summaryEl.innerHTML = `Active: ${activeList}`;
+        summaryEl.style.display = "block";
+      } else {
+        summaryEl.innerHTML = "No active positions";
+        summaryEl.style.display = "block";
+      }
+      
+      // Full table
+      const renderRow = (s, isActive) => {
+        const rowClass = isActive ? "active-row" : "flat-row";
+        const stateClass = s.state === "LONG" ? "ok" : s.state === "SHORT" ? "err" : "";
+        const strengthClass = s.strength !== null && s.strength > 1.0 ? "warn" : "";
         return `
-        <tr>
+        <tr class="${rowClass}">
           <td>${s.strategy_id}</td>
-          <td>${s.state}</td>
-          <td>${s.action}</td>
-          <td>${s.spread === null ? "" : s.spread.toFixed ? s.spread.toFixed(4) : s.spread}</td>
-          <td class="${strengthClass}">${s.strength === null ? "" : s.strength.toFixed ? s.strength.toFixed(2) : s.strength}</td>
-          <td>${s.expected_pnl === null ? "" : s.expected_pnl.toFixed ? s.expected_pnl.toFixed(2) : s.expected_pnl}</td>
+          <td class="${stateClass}">${s.state}</td>
+          <td>${s.spread === null ? "" : s.spread.toFixed(4)}</td>
+          <td class="${strengthClass}">${s.strength === null ? "" : s.strength.toFixed(2)}</td>
           <td>${s.reason}</td>
-        </tr>
-        `;
-      }).join("");
-      return `
-        <div>Case: ${JSON.stringify(data.case)}</div>
+        </tr>`;
+      };
+      
+      const rows = [...active.map(s => renderRow(s, true)), ...inactive.map(s => renderRow(s, false))].join("");
+      document.getElementById("strategies").innerHTML = `
         <table>
-          <thead><tr><th>ID</th><th>State</th><th>Action</th><th>Spread</th><th>Strength</th><th>ExpPnL</th><th>Reason</th></tr></thead>
+          <thead><tr><th>Strategy</th><th>State</th><th>Spread</th><th>Strength</th><th>Reason</th></tr></thead>
           <tbody>${rows}</tbody>
-        </table>
-      `;
+        </table>`;
+    }
+
+    function renderCase(c) {
+      const pct = ((c.tick / c.ticks_per_period) * 100).toFixed(0);
+      const statusClass = c.status === "ACTIVE" ? "ok" : "warn";
+      document.getElementById("case-info").innerHTML = 
+        `Period ${c.period}/${c.total_periods} | Tick ${c.tick}/${c.ticks_per_period} (${pct}%) | <span class="${statusClass}">${c.status}</span>`;
     }
 
     async function refresh() {
       try {
         const [pos, strat] = await Promise.all([fetchJson("/positions"), fetchJson("/strategies")]);
         document.getElementById("status").textContent = "OK";
-        document.getElementById("positions").innerHTML = renderPositions(pos);
-        document.getElementById("strategies").innerHTML = renderStrategies(strat);
-
-        // Compute return (change in PnL)
-        const prevPnl = history.pnl.length > 0 ? history.pnl[history.pnl.length - 1] : pos.total_pnl;
-        const returnVal = pos.total_pnl - prevPnl;
-
-        // Record history
-        history.t.push(Date.now());
-        history.gross.push(pos.gross_exposure);
-        history.net.push(pos.net_exposure);
-        history.pnl.push(pos.total_pnl);
-        if (history.pnl.length > 1) {
-          history.returns.push(returnVal);
+        
+        const pnl = pos.total_pnl;
+        const gross = pos.gross_exposure;
+        const net = pos.net_exposure;
+        
+        // Initialize start PnL on first fetch
+        if (startPnl === null) startPnl = pnl;
+        
+        // Track returns for cumulative Sharpe (ALL data, not capped)
+        if (chartData.pnl.length > 0) {
+          const prevPnl = chartData.pnl[chartData.pnl.length - 1];
+          allReturns.push(pnl - prevPnl);
         }
-
-        // Keep only last MAX_POINTS
-        if (history.t.length > MAX_POINTS) {
-          history.t.shift();
-          history.gross.shift();
-          history.net.shift();
-          history.pnl.shift();
-          if (history.returns.length > MAX_POINTS - 1) {
-            history.returns.shift();
-          }
+        
+        // Chart data (capped for display)
+        chartData.pnl.push(pnl);
+        chartData.gross.push(gross);
+        chartData.net.push(net);
+        if (chartData.pnl.length > CHART_POINTS) {
+          chartData.pnl.shift();
+          chartData.gross.shift();
+          chartData.net.shift();
         }
+        
+        renderCase(strat.case);
+        renderPerformance(pnl);
+        renderExposure(gross, net);
+        renderPositions(pos);
+        renderStrategies(strat);
       } catch (e) {
-        document.getElementById("status").innerHTML = '<span class="err">' + e + '</span>';
+        document.getElementById("status").innerHTML = '<span class="err">ERR: ' + e + '</span>';
       }
     }
 
