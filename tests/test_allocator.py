@@ -85,3 +85,39 @@ def test_switching_penalty_allows_rotation_when_edge_gain_is_large_enough():
     assert math.isclose(w["B"], 1.0, abs_tol=1e-12)
 
 
+def test_drawdown_riskoff_scales_effective_gross_but_does_not_stop_trading():
+    cfg = AllocatorConfig(
+        gross_limit=1_000.0,
+        net_limit=1_000.0,
+        top_n=1,
+        turnover_pct=1.0,
+        horizon_bars=10,
+        switch_lambda=0.0,
+        regime_cutoff=999.0,
+        dd_riskoff_enabled=True,
+        dd_riskoff_start=10.0,
+        dd_riskoff_full=20.0,
+        dd_riskoff_min_scale=0.5,
+    )
+    a = Allocator(cfg)
+    prices = _prices()
+
+    # Set peak pnl then draw down
+    a.update_pnl(0.0)
+    a.update_pnl(-15.0)  # drawdown=15 => scale halfway between 1 and min_scale => 0.5 (clamped)
+
+    # Tick 0: initialize sigma_hat tracking (no edge yet because sigma_hat=0)
+    sig0 = Signal(name="A", s_dollars=0.0, entry_dollars=1.0, rt_cost_dollars=0.0, legs={"AAA": -1.0})
+    a.allocate([sig0], prices, current_pos={t: 0.0 for t in prices})
+
+    # Tick 1: create a non-zero ΔS so sigma_hat > 0 and edge is computable
+    sig1 = Signal(name="A", s_dollars=100.0, entry_dollars=1.0, rt_cost_dollars=0.0, legs={"AAA": -1.0})
+    pos, _ = a.allocate([sig1], prices, current_pos={t: 0.0 for t in prices})
+    diag = a.diagnostics()
+
+    assert diag["dd_risk_scale"] >= 0.5
+    assert diag["effective_gross"] <= cfg.gross_limit
+    # Should still take a non-zero position (not a kill switch)
+    assert abs(pos["AAA"]) > 0
+
+

@@ -75,6 +75,10 @@ class StrategyInspector:
                 switch_lambda=params.allocator.switch_lambda,
                 regime_cutoff=params.allocator.regime_cutoff,
                 w_max=params.allocator.w_max,
+                dd_riskoff_enabled=params.allocator.dd_riskoff_enabled,
+                dd_riskoff_start=params.allocator.dd_riskoff_start,
+                dd_riskoff_full=params.allocator.dd_riskoff_full,
+                dd_riskoff_min_scale=params.allocator.dd_riskoff_min_scale,
             )
             self.allocator = Allocator(cfg)
 

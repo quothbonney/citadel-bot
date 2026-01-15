@@ -144,6 +144,13 @@ class Backtest:
                 if t in portfolio:
                     portfolio[t]['position'] = qty
 
+        # Update allocator PnL (so drawdown-based controls can trigger)
+        if self.runner.allocator and 'allocator' in self.pnl:
+            prices_now = self._get_prices(portfolio)
+            alloc_tracker = self.pnl.get('allocator')
+            if alloc_tracker is not None:
+                self.runner.allocator.update_pnl(alloc_tracker.net_pnl(prices_now))
+
         # Run strategies
         signals = self.runner.on_tick(portfolio, case)
         prices = self._get_prices(portfolio)

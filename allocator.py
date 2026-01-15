@@ -67,6 +67,12 @@ class AllocatorConfig:
     dd_throttle_threshold: float = 100_000.0  # $ drawdown to trigger throttle
     dd_throttle_factor: float = 0.5           # Reduce turnover by this factor when in DD
 
+    # Drawdown risk-off scaling (does NOT stop trading; scales gross down)
+    dd_riskoff_enabled: bool = False
+    dd_riskoff_start: float = 100_000.0       # Start scaling gross when DD exceeds this
+    dd_riskoff_full: float = 400_000.0        # At/above this DD, gross scale hits min
+    dd_riskoff_min_scale: float = 0.25        # Floor on gross scale (never go to 0)
+
 
 TICKERS = ('AAA', 'BBB', 'CCC', 'DDD', 'ETF', 'IND')
 
@@ -105,6 +111,7 @@ class Allocator:
         self._peak_pnl: float = 0.0
         self._current_pnl: float = 0.0
         self._dd_throttle_active: bool = False
+        self._dd_risk_scale: float = 1.0
 
     def allocate(
         self,
@@ -120,15 +127,27 @@ class Allocator:
         # Update portfolio vol scaling
         if current_pos is not None:
             self._update_vol_scale(current_pos, prices)
+
+        effective_gross = self.config.gross_limit * self._vol_scale * self._dd_risk_scale
         
         if not signals:
-            self._last_diag = {"reason": "no_signals", "vol_scale": self._vol_scale}
+            self._last_diag = {
+                "reason": "no_signals",
+                "vol_scale": self._vol_scale,
+                "dd_risk_scale": self._dd_risk_scale,
+                "effective_gross": effective_gross,
+            }
             return self._flatten(current_pos), []
 
         # Optional coarse filter
         signals = [s for s in signals if abs(s.s_dollars) >= self.config.min_threshold]
         if not signals:
-            self._last_diag = {"reason": "below_min_threshold", "vol_scale": self._vol_scale}
+            self._last_diag = {
+                "reason": "below_min_threshold",
+                "vol_scale": self._vol_scale,
+                "dd_risk_scale": self._dd_risk_scale,
+                "effective_gross": effective_gross,
+            }
             return self._flatten(current_pos), []
 
         self._last_inputs = {
@@ -147,6 +166,9 @@ class Allocator:
                 "regime_ratio": regime_ratio,
                 "net_raw": net_raw,
                 "inputs": self._last_inputs,
+                "vol_scale": self._vol_scale,
+                "dd_risk_scale": self._dd_risk_scale,
+                "effective_gross": effective_gross,
             }
             return self._flatten(current_pos), []
 
@@ -169,8 +191,7 @@ class Allocator:
         active_names = [n for n, ww in sorted(w.items(), key=lambda kv: kv[1], reverse=True) if ww > 0]
 
         # Allocate: each signal gets weight fraction of gross budget
-        # Apply vol scaling to gross limit
-        effective_gross = self.config.gross_limit * self._vol_scale
+        # Apply (optional) vol scaling and (optional) drawdown risk-off scaling to gross limit
         
         pos = {t: 0.0 for t in TICKERS}
 
@@ -214,9 +235,42 @@ class Allocator:
             "net_raw": net_raw,
             "inputs": self._last_inputs,
             "vol_scale": self._vol_scale,
+            "dd_risk_scale": self._dd_risk_scale,
             "effective_gross": effective_gross,
         }
         return pos, active_names
+
+    def update_pnl(self, current_pnl: float) -> None:
+        """Update PnL tracking for drawdown-based controls."""
+        self._current_pnl = float(current_pnl)
+        if self._current_pnl > self._peak_pnl:
+            self._peak_pnl = self._current_pnl
+
+        drawdown = self._peak_pnl - self._current_pnl
+
+        # Throttle (existing behavior)
+        if self.config.dd_throttle_enabled:
+            self._dd_throttle_active = drawdown > self.config.dd_throttle_threshold
+        else:
+            self._dd_throttle_active = False
+
+        # Risk-off gross scaling (new)
+        if not self.config.dd_riskoff_enabled:
+            self._dd_risk_scale = 1.0
+            return
+
+        start = float(self.config.dd_riskoff_start)
+        full = float(self.config.dd_riskoff_full)
+        if full <= start:
+            raise ValueError("dd_riskoff_full must be > dd_riskoff_start")
+
+        if drawdown <= start:
+            self._dd_risk_scale = 1.0
+            return
+
+        frac = (drawdown - start) / (full - start)
+        raw = 1.0 - frac
+        self._dd_risk_scale = float(np.clip(raw, self.config.dd_riskoff_min_scale, 1.0))
     
     def _update_vol_scale(self, current_pos: dict[str, float], prices: dict[str, float]) -> None:
         """Update portfolio vol scaling factor based on EWMA of portfolio value changes."""
@@ -268,17 +322,6 @@ class Allocator:
         """Sync internal state with actual positions after execution."""
         for t in TICKERS:
             self._prev_pos[t] = actual_pos.get(t, 0.0)
-    
-    def update_pnl(self, current_pnl: float) -> None:
-        """Update PnL tracking for drawdown throttle."""
-        self._current_pnl = current_pnl
-        if current_pnl > self._peak_pnl:
-            self._peak_pnl = current_pnl
-        
-        # Check if drawdown throttle should be active
-        if self.config.dd_throttle_enabled:
-            drawdown = self._peak_pnl - self._current_pnl
-            self._dd_throttle_active = drawdown > self.config.dd_throttle_threshold
 
     def _flatten(self, current_pos: dict[str, float] | None) -> dict[str, float]:
         """Move toward zero, respecting turnover cap."""

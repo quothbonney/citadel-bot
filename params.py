@@ -86,6 +86,10 @@ class AllocatorConfig:
     dd_throttle_enabled: bool = False
     dd_throttle_threshold: float = 100_000.0  # $ drawdown to trigger throttle
     dd_throttle_factor: float = 0.5  # Reduce entry turnover by this when in DD
+    dd_riskoff_enabled: bool = False
+    dd_riskoff_start: float = 100_000.0
+    dd_riskoff_full: float = 400_000.0
+    dd_riskoff_min_scale: float = 0.25
     cancel_cooldown_s: float = 0.25
     unknown_order_ttl_s: float = 2.0
     enabled: bool = True
@@ -144,6 +148,10 @@ class StrategyParams:
                 dd_throttle_enabled=a.get('dd_throttle_enabled', False),
                 dd_throttle_threshold=a.get('dd_throttle_threshold', 100_000.0),
                 dd_throttle_factor=a.get('dd_throttle_factor', 0.5),
+                dd_riskoff_enabled=a.get('dd_riskoff_enabled', False),
+                dd_riskoff_start=a.get('dd_riskoff_start', 100_000.0),
+                dd_riskoff_full=a.get('dd_riskoff_full', 400_000.0),
+                dd_riskoff_min_scale=a.get('dd_riskoff_min_scale', 0.25),
                 cancel_cooldown_s=a.get('cancel_cooldown_s', 0.25),
                 unknown_order_ttl_s=a.get('unknown_order_ttl_s', 2.0),
                 enabled=a.get('enabled', True),

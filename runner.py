@@ -63,6 +63,10 @@ class StrategyRunner:
                 dd_throttle_enabled=params.allocator.dd_throttle_enabled,
                 dd_throttle_threshold=params.allocator.dd_throttle_threshold,
                 dd_throttle_factor=params.allocator.dd_throttle_factor,
+                dd_riskoff_enabled=params.allocator.dd_riskoff_enabled,
+                dd_riskoff_start=params.allocator.dd_riskoff_start,
+                dd_riskoff_full=params.allocator.dd_riskoff_full,
+                dd_riskoff_min_scale=params.allocator.dd_riskoff_min_scale,
             )
             self.allocator = Allocator(config)
             vol_info = f' vol_scale=ON(target=${config.target_vol:,.0f})' if config.vol_scale_enabled else ''
@@ -181,6 +185,14 @@ class StrategyRunner:
 
         # Get prices
         prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}
+
+        # Update allocator with current PnL (for drawdown-based risk-off controls)
+        # PnL is provided per-security by the RIT API snapshot.
+        pnl = 0.0
+        for t in self.market.all_tickers:
+            sec = portfolio.get(t, {})
+            pnl += float(sec.get("unrealized", 0.0) or 0.0) + float(sec.get("realized", 0.0) or 0.0)
+        self.allocator.update_pnl(pnl)
 
         # Get current positions, plus conservative adjustments from outstanding orders
         current_pos = {t: portfolio.get(t, {}).get('position', 0) for t in self.market.all_tickers}

@@ -24,6 +24,10 @@
     "dd_throttle_enabled": false,
     "dd_throttle_threshold": 100000,
     "dd_throttle_factor": 0.5,
+    "dd_riskoff_enabled": true,
+    "dd_riskoff_start": 150000,
+    "dd_riskoff_full": 400000,
+    "dd_riskoff_min_scale": 0.35,
     "cancel_cooldown_s": 0.25,
     "unknown_order_ttl_s": 2.0,
     "enabled": true
