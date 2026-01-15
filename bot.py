@@ -75,6 +75,7 @@ def run(params_path: str = None, scale: int = 1000, verbose: bool = False,
             # Update PnL tracker and get per-strategy stats
             runner.update_pnl(pnl)
             strategy_stats = runner.get_pnl_stats()
+            spreads = runner.get_spreads()
 
             # Get active strategies from last signal
             active = []
@@ -90,6 +91,7 @@ def run(params_path: str = None, scale: int = 1000, verbose: bool = False,
                 positions=positions,
                 active=active,
                 strategy_stats=strategy_stats,
+                spreads=spreads,
             )
 
         tick_count += 1

@@ -122,6 +122,7 @@ class StrategyRunner:
         self.pnl_tracker = PnLTracker(strategy_names)
         self._last_active: list[str] = []
         self._last_weights: dict[str, float] = {}
+        self._last_spreads: dict[str, dict] = {}  # {name: {signal, sigma, strength}}
 
         # Initialize allocator if enabled
         self.allocator: PortfolioAllocator | None = None
@@ -149,6 +150,10 @@ class StrategyRunner:
     def get_pnl_stats(self) -> dict:
         """Get PnL stats for all strategies."""
         return self.pnl_tracker.get_stats()
+
+    def get_spreads(self) -> dict:
+        """Get current spread values for all strategies."""
+        return self._last_spreads.copy()
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -257,6 +262,17 @@ class StrategyRunner:
             spec = strategy.get_signal_spec(portfolio, case)
             if spec is not None:
                 specs.append(spec)
+
+        # Track spread values for dashboard
+        self._last_spreads = {
+            s.name: {
+                'signal': s.signal,
+                'sigma': s.sigma,
+                'strength': s.strength,
+                'abs_signal': s.abs_signal,
+            }
+            for s in specs
+        }
 
         # Get prices
         prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}

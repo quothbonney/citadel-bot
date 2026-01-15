@@ -22,6 +22,7 @@ state = {
     'signals': [],
     'active_strategies': [],
     'strategy_stats': {},
+    'spreads': {},
 }
 
 HTML_TEMPLATE = """
@@ -87,7 +88,7 @@ HTML_TEMPLATE = """
         <div class="card full-width">
             <h2>Strategy Performance</h2>
             <table>
-                <thead><tr><th>Strategy</th><th>PnL</th><th>Sharpe</th><th>Active Ticks</th></tr></thead>
+                <thead><tr><th>Strategy</th><th>Spread</th><th>Strength</th><th>PnL</th><th>Sharpe</th><th>Active Ticks</th></tr></thead>
                 <tbody id="strategy-stats"></tbody>
             </table>
         </div>
@@ -180,27 +181,41 @@ HTML_TEMPLATE = """
             const statsEl = document.getElementById('strategy-stats');
             let statsHtml = '';
             const stats = data.strategy_stats || {};
-            // Sort: total first, then by PnL descending
+            const spreads = data.spreads || {};
+            const activeSet = new Set(data.active_strategies || []);
+            // Sort: total first, then by strength descending
             const sortedNames = Object.keys(stats).sort((a, b) => {
                 if (a === 'total') return -1;
                 if (b === 'total') return 1;
-                return (stats[b].pnl || 0) - (stats[a].pnl || 0);
+                const strA = spreads[a]?.strength || 0;
+                const strB = spreads[b]?.strength || 0;
+                return strB - strA;
             });
             for (const name of sortedNames) {
                 const s = stats[name];
+                const sp = spreads[name] || {};
                 const pnl = s.pnl || 0;
                 const sharpe = s.sharpe || 0;
                 const ticks = s.active_ticks || 0;
+                const spread = sp.signal || 0;
+                const strength = sp.strength || 0;
                 const pnlCls = pnl >= 0 ? 'pos-long' : 'pos-short';
                 const sharpeCls = sharpe >= 1 ? 'sharpe-good' : (sharpe >= 0 ? 'sharpe-ok' : 'sharpe-bad');
-                const rowStyle = name === 'total' ? 'font-weight: bold; border-top: 2px solid #3498db;' : '';
+                const spreadCls = spread > 0 ? 'pos-short' : (spread < 0 ? 'pos-long' : '');
+                const isActive = activeSet.has(name);
+                const rowStyle = name === 'total' ? 'font-weight: bold; border-top: 2px solid #3498db;' :
+                                 (isActive ? 'background: #1e3a5f;' : '');
+                const spreadStr = name === 'total' ? '-' : spread.toFixed(4);
+                const strengthStr = name === 'total' ? '-' : strength.toFixed(2);
                 statsHtml += '<tr style="' + rowStyle + '">' +
-                    '<td>' + name + '</td>' +
+                    '<td>' + name + (isActive ? ' *' : '') + '</td>' +
+                    '<td class="' + spreadCls + '">' + spreadStr + '</td>' +
+                    '<td>' + strengthStr + '</td>' +
                     '<td class="' + pnlCls + '">' + formatMoney(pnl) + '</td>' +
                     '<td class="' + sharpeCls + '">' + sharpe.toFixed(2) + '</td>' +
                     '<td>' + ticks.toLocaleString() + '</td></tr>';
             }
-            statsEl.innerHTML = statsHtml || '<tr><td colspan="4" style="color:#7f8c8d">No data</td></tr>';
+            statsEl.innerHTML = statsHtml || '<tr><td colspan="6" style="color:#7f8c8d">No data</td></tr>';
         }
 
         // SSE connection
@@ -231,7 +246,8 @@ def stream():
 
 def update_state(tick: int, period: int, pnl: float,
                  positions: dict, active: list,
-                 strategy_stats: dict | None = None) -> None:
+                 strategy_stats: dict | None = None,
+                 spreads: dict | None = None) -> None:
     """Called by bot to update dashboard state.
 
     Args:
@@ -241,6 +257,7 @@ def update_state(tick: int, period: int, pnl: float,
         positions: Dict of {ticker: {'position': int, 'price': float}}
         active: List of active strategy names
         strategy_stats: Dict of {strategy_name: {'pnl': float, 'sharpe': float, 'active_ticks': int}}
+        spreads: Dict of {strategy_name: {'signal': float, 'sigma': float, 'strength': float}}
     """
     state['tick'] = tick
     state['period'] = period
@@ -248,6 +265,7 @@ def update_state(tick: int, period: int, pnl: float,
     state['positions'] = positions
     state['active_strategies'] = active
     state['strategy_stats'] = strategy_stats or {}
+    state['spreads'] = spreads or {}
 
 
 def run_dashboard(port: int = 5000) -> None:
