@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from RotmanInteractiveTraderApi import OrderAction, OrderStatus
-from order_manager import OrderManager
+from order_manager import OrderManager, OrderRejectedByRiskLimit
 
 
 @dataclass
@@ -74,6 +74,14 @@ class FakeClientNoOrderId(FakeClient):
         return {"error": "rejected", "detail": "simulated"}
 
 
+class FakeClientRiskLimit(FakeClient):
+    def place_order(self, ticker, order_type, quantity, action, price=None, dry_run=None):
+        return {
+            "code": "INTERNAL_SERVER_ERROR",
+            "message": "Order request cannot be submitted because it will exceed gross trading limits in the risk category LIMIT-STOCK.",
+        }
+
+
 def test_order_manager_wont_flip_sides_same_tick_when_cancel_is_unreliable():
     c = FakeClient()
     om = OrderManager(c, cancel_cooldown_s=0.25, unknown_order_ttl_s=10.0)  # type: ignore[arg-type]
@@ -123,5 +131,17 @@ def test_order_manager_raises_clear_error_if_place_order_returns_no_order_id():
         om.reconcile_target_orders({"AAA": (OrderAction.BUY, 100, 10.0)})
 
     assert "missing order_id" in str(e.value)
+
+
+def test_order_manager_handles_risk_limit_rejection_without_crashing():
+    c = FakeClientRiskLimit()
+    om = OrderManager(c, cancel_cooldown_s=0.0, unknown_order_ttl_s=10.0)  # type: ignore[arg-type]
+
+    # reconcile_target_orders should swallow ONLY OrderRejectedByRiskLimit and return
+    om.reconcile_target_orders({"AAA": (OrderAction.BUY, 100, 10.0)})
+
+    # submit() should still raise directly if called
+    with pytest.raises(OrderRejectedByRiskLimit):
+        om.submit("AAA", OrderAction.BUY, 100, 10.0)
 
 

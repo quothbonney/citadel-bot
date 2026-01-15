@@ -8,6 +8,18 @@ import logging
 from RotmanInteractiveTraderApi import OrderAction, OrderStatus, OrderType, RotmanInteractiveTraderApi
 
 
+class OrderRejectedByRiskLimit(RuntimeError):
+    def __init__(self, *, ticker: str, side: str, qty: int, price: float | None, resp: object) -> None:
+        super().__init__(
+            f"order rejected by risk limit: ticker={ticker} side={side} qty={qty} price={price} resp={resp!r}"
+        )
+        self.ticker = ticker
+        self.side = side
+        self.qty = qty
+        self.price = price
+        self.resp = resp
+
+
 class LocalState(str, Enum):
     SENT = "SENT"          # submitted locally
     LIVE = "LIVE"          # observed on server as OPEN
@@ -128,6 +140,18 @@ class OrderManager:
             price=price,
         )
         if not isinstance(resp, dict) or "order_id" not in resp:
+            # Handle known RIT error: risk limit rejection. Do not crash the whole bot for this.
+            if isinstance(resp, dict):
+                msg = str(resp.get("message") or "")
+                if "exceed gross trading limits" in msg.lower():
+                    raise OrderRejectedByRiskLimit(
+                        ticker=ticker,
+                        side=side.value,
+                        qty=quantity,
+                        price=price,
+                        resp=resp,
+                    )
+
             # Fail loudly with the actual server payload; do not guess.
             logging.error(
                 "place_order unexpected response: ticker=%s side=%s qty=%s price=%s resp=%r",
@@ -189,6 +213,11 @@ class OrderManager:
 
             if qty <= 0:
                 continue
-            self.submit(ticker, side, qty, price)
+            try:
+                self.submit(ticker, side, qty, price)
+            except OrderRejectedByRiskLimit as e:
+                logging.warning("%s", e)
+                # Stop submitting further orders this tick; we're at the server's limit.
+                return
 
 
