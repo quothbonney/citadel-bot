@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import time
+import logging
 
 from RotmanInteractiveTraderApi import OrderAction, OrderStatus, OrderType, RotmanInteractiveTraderApi
 
@@ -126,6 +127,20 @@ class OrderManager:
             side,
             price=price,
         )
+        if not isinstance(resp, dict) or "order_id" not in resp:
+            # Fail loudly with the actual server payload; do not guess.
+            logging.error(
+                "place_order unexpected response: ticker=%s side=%s qty=%s price=%s resp=%r",
+                ticker,
+                side.value,
+                quantity,
+                price,
+                resp,
+            )
+            raise ValueError(
+                f"place_order returned unexpected response (missing order_id): "
+                f"ticker={ticker} side={side.value} qty={quantity} price={price} resp={resp!r}"
+            )
         oid = int(resp["order_id"])
         tr = TrackedOrder(
             order_id=oid,

@@ -68,6 +68,12 @@ class FakeClient:
         o.status = OrderStatus.TRANSACTED.value
 
 
+class FakeClientNoOrderId(FakeClient):
+    def place_order(self, ticker, order_type, quantity, action, price=None, dry_run=None):
+        # Simulate API rejection/rate limit payload that lacks 'order_id'
+        return {"error": "rejected", "detail": "simulated"}
+
+
 def test_order_manager_wont_flip_sides_same_tick_when_cancel_is_unreliable():
     c = FakeClient()
     om = OrderManager(c, cancel_cooldown_s=0.25, unknown_order_ttl_s=10.0)  # type: ignore[arg-type]
@@ -107,5 +113,15 @@ def test_order_manager_cancel_cooldown_blocks_immediate_resubmit_after_cancel():
 
     # Order is still OPEN, and cooldown should prevent any new order submission.
     assert len(c.get_orders(OrderStatus.OPEN)) == 1
+
+
+def test_order_manager_raises_clear_error_if_place_order_returns_no_order_id():
+    c = FakeClientNoOrderId()
+    om = OrderManager(c, cancel_cooldown_s=0.25, unknown_order_ttl_s=10.0)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError) as e:
+        om.reconcile_target_orders({"AAA": (OrderAction.BUY, 100, 10.0)})
+
+    assert "missing order_id" in str(e.value)
 
 
