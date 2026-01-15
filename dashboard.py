@@ -21,6 +21,7 @@ state = {
     'positions': {},
     'signals': [],
     'active_strategies': [],
+    'strategy_stats': {},
 }
 
 HTML_TEMPLATE = """
@@ -51,6 +52,10 @@ HTML_TEMPLATE = """
         .signal { padding: 4px 8px; background: #2c3e50; border-radius: 4px; margin: 2px; display: inline-block; }
         #chart-container { height: 200px; }
         .status { display: flex; gap: 20px; align-items: baseline; }
+        .sharpe-good { color: #2ecc71; }
+        .sharpe-ok { color: #f39c12; }
+        .sharpe-bad { color: #e74c3c; }
+        .full-width { grid-column: 1 / -1; }
     </style>
 </head>
 <body>
@@ -78,6 +83,13 @@ HTML_TEMPLATE = """
             <div id="chart-container">
                 <canvas id="chart"></canvas>
             </div>
+        </div>
+        <div class="card full-width">
+            <h2>Strategy Performance</h2>
+            <table>
+                <thead><tr><th>Strategy</th><th>PnL</th><th>Sharpe</th><th>Active Ticks</th></tr></thead>
+                <tbody id="strategy-stats"></tbody>
+            </table>
         </div>
     </div>
 
@@ -163,6 +175,32 @@ HTML_TEMPLATE = """
             chart.data.labels = pnlHistory.map((_, i) => i);
             chart.data.datasets[0].data = pnlHistory;
             chart.update('none');
+
+            // Strategy Stats
+            const statsEl = document.getElementById('strategy-stats');
+            let statsHtml = '';
+            const stats = data.strategy_stats || {};
+            // Sort: total first, then by PnL descending
+            const sortedNames = Object.keys(stats).sort((a, b) => {
+                if (a === 'total') return -1;
+                if (b === 'total') return 1;
+                return (stats[b].pnl || 0) - (stats[a].pnl || 0);
+            });
+            for (const name of sortedNames) {
+                const s = stats[name];
+                const pnl = s.pnl || 0;
+                const sharpe = s.sharpe || 0;
+                const ticks = s.active_ticks || 0;
+                const pnlCls = pnl >= 0 ? 'pos-long' : 'pos-short';
+                const sharpeCls = sharpe >= 1 ? 'sharpe-good' : (sharpe >= 0 ? 'sharpe-ok' : 'sharpe-bad');
+                const rowStyle = name === 'total' ? 'font-weight: bold; border-top: 2px solid #3498db;' : '';
+                statsHtml += '<tr style="' + rowStyle + '">' +
+                    '<td>' + name + '</td>' +
+                    '<td class="' + pnlCls + '">' + formatMoney(pnl) + '</td>' +
+                    '<td class="' + sharpeCls + '">' + sharpe.toFixed(2) + '</td>' +
+                    '<td>' + ticks.toLocaleString() + '</td></tr>';
+            }
+            statsEl.innerHTML = statsHtml || '<tr><td colspan="4" style="color:#7f8c8d">No data</td></tr>';
         }
 
         // SSE connection
@@ -192,7 +230,8 @@ def stream():
 
 
 def update_state(tick: int, period: int, pnl: float,
-                 positions: dict, active: list) -> None:
+                 positions: dict, active: list,
+                 strategy_stats: dict | None = None) -> None:
     """Called by bot to update dashboard state.
 
     Args:
@@ -201,12 +240,14 @@ def update_state(tick: int, period: int, pnl: float,
         pnl: Current PnL in dollars
         positions: Dict of {ticker: {'position': int, 'price': float}}
         active: List of active strategy names
+        strategy_stats: Dict of {strategy_name: {'pnl': float, 'sharpe': float, 'active_ticks': int}}
     """
     state['tick'] = tick
     state['period'] = period
     state['pnl'] = pnl
     state['positions'] = positions
     state['active_strategies'] = active
+    state['strategy_stats'] = strategy_stats or {}
 
 
 def run_dashboard(port: int = 5000) -> None:

@@ -72,6 +72,10 @@ def run(params_path: str = None, scale: int = 1000, verbose: bool = False,
             pnl = sum(sec.get('unrealized', 0) + sec.get('realized', 0)
                       for sec in portfolio.values() if isinstance(sec, dict))
 
+            # Update PnL tracker and get per-strategy stats
+            runner.update_pnl(pnl)
+            strategy_stats = runner.get_pnl_stats()
+
             # Get active strategies from last signal
             active = []
             if signals and signals[0].reason:
@@ -85,6 +89,7 @@ def run(params_path: str = None, scale: int = 1000, verbose: bool = False,
                 pnl=pnl,
                 positions=positions,
                 active=active,
+                strategy_stats=strategy_stats,
             )
 
         tick_count += 1

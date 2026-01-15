@@ -1,6 +1,8 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
+
+import numpy as np
 
 from RotmanInteractiveTraderApi import RotmanInteractiveTraderApi, OrderType, OrderAction
 from allocator import PortfolioAllocator, AllocatorConfig
@@ -9,6 +11,90 @@ from params import StrategyParams
 from sizer import Sizer, UnitSizer
 from strategies import SignalStrategy, Signal, PairCointStrategy, EtfNavStrategy
 from strategies.base import get_mid
+
+
+@dataclass
+class StrategyPnL:
+    """Track PnL for a strategy based on its allocation weight."""
+    name: str
+    pnl: float = 0.0
+    pnl_history: list = field(default_factory=list)
+    active_ticks: int = 0
+
+    @property
+    def sharpe(self) -> float:
+        """Compute Sharpe ratio from PnL history."""
+        if len(self.pnl_history) < 10:
+            return 0.0
+        returns = np.diff(self.pnl_history)
+        if len(returns) == 0 or np.std(returns) < 1e-9:
+            return 0.0
+        # Annualize: ~780 ticks per period, 2 periods per session
+        return np.mean(returns) / np.std(returns) * np.sqrt(780)
+
+
+class PnLTracker:
+    """Track PnL attribution across strategies."""
+
+    def __init__(self, strategy_names: list[str]):
+        self.strategies = {name: StrategyPnL(name) for name in strategy_names}
+        self.strategies['total'] = StrategyPnL('total')
+        self._prev_pnl = 0.0
+        self._strategy_weights: dict[str, float] = {}
+
+    def update(self, total_pnl: float, active_strategies: list[str],
+               weights: dict[str, float] | None = None) -> None:
+        """Update PnL tracking with new total PnL and active strategies.
+
+        Args:
+            total_pnl: Current total portfolio PnL
+            active_strategies: List of currently active strategy names
+            weights: Optional dict of strategy name -> weight (0-1)
+        """
+        # Compute PnL delta
+        delta = total_pnl - self._prev_pnl
+        self._prev_pnl = total_pnl
+
+        # Update total
+        self.strategies['total'].pnl = total_pnl
+        self.strategies['total'].pnl_history.append(total_pnl)
+
+        # Store weights for attribution
+        if weights:
+            self._strategy_weights = weights
+
+        # Attribute delta to active strategies proportionally
+        if active_strategies and delta != 0:
+            # If we have weights, use them; otherwise equal weight
+            if self._strategy_weights:
+                total_weight = sum(self._strategy_weights.get(s, 0) for s in active_strategies)
+                for name in active_strategies:
+                    if name in self.strategies:
+                        w = self._strategy_weights.get(name, 0) / total_weight if total_weight > 0 else 0
+                        self.strategies[name].pnl += delta * w
+                        self.strategies[name].active_ticks += 1
+            else:
+                share = delta / len(active_strategies)
+                for name in active_strategies:
+                    if name in self.strategies:
+                        self.strategies[name].pnl += share
+                        self.strategies[name].active_ticks += 1
+
+        # Update history for all strategies
+        for name, spnl in self.strategies.items():
+            if name != 'total':
+                spnl.pnl_history.append(spnl.pnl)
+
+    def get_stats(self) -> dict:
+        """Get current stats for all strategies."""
+        return {
+            name: {
+                'pnl': spnl.pnl,
+                'sharpe': spnl.sharpe,
+                'active_ticks': spnl.active_ticks,
+            }
+            for name, spnl in self.strategies.items()
+        }
 
 
 class StrategyRunner:
@@ -31,6 +117,12 @@ class StrategyRunner:
         self.strategies: list[SignalStrategy] = []
         self._build_strategies()
 
+        # Initialize PnL tracker
+        strategy_names = [s.strategy_id for s in self.strategies]
+        self.pnl_tracker = PnLTracker(strategy_names)
+        self._last_active: list[str] = []
+        self._last_weights: dict[str, float] = {}
+
         # Initialize allocator if enabled
         self.allocator: PortfolioAllocator | None = None
         if params.allocator and params.allocator.enabled:
@@ -49,6 +141,14 @@ class StrategyRunner:
             logging.info('Allocator enabled: gross=$%.0fM min_thresh=%.2f top_n=%d SL=%.1fx TP=%.1fx max_hold=%d',
                          config.gross_limit / 1e6, config.min_threshold, config.top_n,
                          config.stop_loss_mult, config.take_profit_mult, config.max_hold_ticks)
+
+    def update_pnl(self, total_pnl: float) -> None:
+        """Update PnL tracking with current total PnL."""
+        self.pnl_tracker.update(total_pnl, self._last_active, self._last_weights)
+
+    def get_pnl_stats(self) -> dict:
+        """Get PnL stats for all strategies."""
+        return self.pnl_tracker.get_stats()
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -176,6 +276,17 @@ class StrategyRunner:
 
         # Allocate (returns target positions and list of active strategy names)
         target_pos, active_names = self.allocator.allocate(specs, prices, current_pos)
+
+        # Track active strategies and weights for PnL attribution
+        self._last_active = active_names
+        if active_names:
+            # Compute weights from spec strengths
+            active_specs = [s for s in specs if s.name in active_names]
+            total_strength = sum(s.strength for s in active_specs)
+            if total_strength > 0:
+                self._last_weights = {s.name: s.strength / total_strength for s in active_specs}
+        else:
+            self._last_weights = {}
 
         # Convert to orders (with debug logging)
         orders = self.allocator.positions_to_orders(target_pos, current_pos, prices, debug=True)
