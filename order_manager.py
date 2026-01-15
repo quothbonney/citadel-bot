@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+from RotmanInteractiveTraderApi import OrderAction, OrderStatus, OrderType, RotmanInteractiveTraderApi
+
+
+class LocalState(str, Enum):
+    SENT = "SENT"          # submitted locally
+    LIVE = "LIVE"          # observed on server as OPEN
+    CANCEL_SENT = "CANCEL_SENT"
+    DONE = "DONE"          # observed CANCELLED or TRANSACTED
+
+
+@dataclass
+class TrackedOrder:
+    order_id: int
+    ticker: str
+    side: OrderAction
+    quantity: int
+    price: float | None
+    state: LocalState = LocalState.SENT
+    quantity_filled: float = 0.0
+    status: OrderStatus | None = None
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, float(self.quantity) - float(self.quantity_filled))
+
+    @property
+    def signed_remaining(self) -> float:
+        sign = 1.0 if self.side == OrderAction.BUY else -1.0
+        return sign * self.remaining
+
+
+class OrderManager:
+    """Minimal order lifecycle manager.
+
+    Key rule: never run both BUY and SELL for the same ticker concurrently.
+    If we need to flip, we cancel first and *wait* for confirmation via refresh().
+    This avoids 'cancel didn't actually cancel' simulator gotchas turning into double fills.
+    """
+
+    def __init__(self, client: RotmanInteractiveTraderApi) -> None:
+        self.client = client
+        self._orders: dict[int, TrackedOrder] = {}
+
+    def refresh(self) -> None:
+        """Reconcile local tracked orders with server state."""
+        open_orders = {o["order_id"]: o for o in self.client.get_orders(OrderStatus.OPEN)}
+        cancelled = {o["order_id"]: o for o in self.client.get_orders(OrderStatus.CANCELLED)}
+        transacted = {o["order_id"]: o for o in self.client.get_orders(OrderStatus.TRANSACTED)}
+
+        for oid, tr in list(self._orders.items()):
+            if oid in open_orders:
+                o = open_orders[oid]
+                tr.status = OrderStatus.OPEN
+                tr.quantity_filled = float(o.get("quantity_filled", 0.0))
+                tr.state = LocalState.LIVE
+                continue
+
+            if oid in cancelled:
+                o = cancelled[oid]
+                tr.status = OrderStatus.CANCELLED
+                tr.quantity_filled = float(o.get("quantity_filled", tr.quantity_filled))
+                tr.state = LocalState.DONE
+                continue
+
+            if oid in transacted:
+                o = transacted[oid]
+                tr.status = OrderStatus.TRANSACTED
+                tr.quantity_filled = float(o.get("quantity_filled", tr.quantity_filled))
+                tr.state = LocalState.DONE
+                continue
+
+            # Unknown to server queries. Keep state as-is; do not assume cancellation worked.
+
+        # Drop DONE orders to keep memory bounded
+        for oid in [oid for oid, tr in self._orders.items() if tr.state == LocalState.DONE]:
+            del self._orders[oid]
+
+    def effective_position_adjustments(self) -> dict[str, float]:
+        """Conservative position adjustments from outstanding OPEN orders."""
+        adj: dict[str, float] = {}
+        for tr in self._orders.values():
+            if tr.state in (LocalState.SENT, LocalState.LIVE, LocalState.CANCEL_SENT):
+                adj[tr.ticker] = adj.get(tr.ticker, 0.0) + tr.signed_remaining
+        return adj
+
+    def open_orders_for_ticker(self, ticker: str) -> list[TrackedOrder]:
+        return [o for o in self._orders.values() if o.ticker == ticker]
+
+    def cancel_ticker(self, ticker: str) -> None:
+        ids = [o.order_id for o in self.open_orders_for_ticker(ticker)]
+        if not ids:
+            return
+        self.client.cancel_orders(ids)
+        for oid in ids:
+            tr = self._orders.get(oid)
+            if tr is not None and tr.state != LocalState.DONE:
+                tr.state = LocalState.CANCEL_SENT
+
+    def submit(self, ticker: str, side: OrderAction, quantity: int, price: float | None) -> int:
+        resp = self.client.place_order(
+            ticker,
+            OrderType.LIMIT,
+            quantity,
+            side,
+            price=price,
+        )
+        oid = int(resp["order_id"])
+        tr = TrackedOrder(
+            order_id=oid,
+            ticker=ticker,
+            side=side,
+            quantity=int(quantity),
+            price=float(price) if price is not None else None,
+            state=LocalState.SENT,
+            quantity_filled=float(resp.get("quantity_filled", 0.0)),
+            status=OrderStatus(resp.get("status", OrderStatus.OPEN.value)),
+        )
+        self._orders[oid] = tr
+        return oid
+
+    def reconcile_target_orders(self, desired: dict[str, tuple[OrderAction, int, float | None]]) -> None:
+        """Cancel/submit to move toward desired per-ticker orders.
+
+        desired maps ticker -> (side, qty, price). If ticker absent, we cancel any live orders.
+        """
+        # Cancel tickers not desired anymore
+        for tr in list(self._orders.values()):
+            if tr.ticker not in desired:
+                self.cancel_ticker(tr.ticker)
+
+        for ticker, (side, qty, price) in desired.items():
+            existing = self.open_orders_for_ticker(ticker)
+            if existing:
+                # If we already have a same-side order, keep it (minimal).
+                # If side differs, cancel and wait; do NOT place opposite in same tick.
+                if any(o.side != side for o in existing):
+                    self.cancel_ticker(ticker)
+                continue
+
+            if qty <= 0:
+                continue
+            self.submit(ticker, side, qty, price)
+
+

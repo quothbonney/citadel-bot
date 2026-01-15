@@ -5,6 +5,7 @@ from typing import Protocol
 from RotmanInteractiveTraderApi import RotmanInteractiveTraderApi, OrderType, OrderAction
 from allocator import Allocator, AllocatorConfig, Signal as AllocSignal
 from market import Market, market
+from order_manager import OrderManager
 from params import StrategyParams
 from sizer import Sizer, UnitSizer
 from strategies import SignalStrategy, Signal, PairCointStrategy, EtfNavStrategy
@@ -27,6 +28,9 @@ class StrategyRunner:
         self.market = mkt
         self.sizer = sizer or UnitSizer()
         self.dry_run = dry_run
+        self.order_manager: OrderManager | None = None
+        if self.client is not None and not self.dry_run:
+            self.order_manager = OrderManager(self.client)
 
         self.strategies: list[SignalStrategy] = []
         self._build_strategies()
@@ -119,21 +123,18 @@ class StrategyRunner:
                     signal.strategy_id, order.side, qty, order.ticker, order.price
                 )
             else:
-                try:
-                    resp = self.client.place_order(
-                        order.ticker,
-                        OrderType.LIMIT,
-                        qty,
-                        action,
-                        price=order.price,
-                    )
-                    logging.info(
-                        '%s: %s %d %s @ %.2f -> order_id=%s',
-                        signal.strategy_id, order.side, qty, order.ticker, order.price,
-                        resp.get('order_id') if isinstance(resp, dict) else resp
-                    )
-                except Exception as e:
-                    logging.error('%s: order failed: %s', signal.strategy_id, e)
+                resp = self.client.place_order(
+                    order.ticker,
+                    OrderType.LIMIT,
+                    qty,
+                    action,
+                    price=order.price,
+                )
+                logging.info(
+                    '%s: %s %d %s @ %.2f -> order_id=%s',
+                    signal.strategy_id, order.side, qty, order.ticker, order.price,
+                    resp.get('order_id') if isinstance(resp, dict) else resp
+                )
 
     def on_tick(self, portfolio: dict, case: dict) -> list[Signal]:
         """Process one tick across all strategies."""
@@ -160,6 +161,10 @@ class StrategyRunner:
 
     def _on_tick_allocated(self, portfolio: dict, case: dict) -> list[Signal]:
         """Process tick with top-N weighted allocation."""
+        # Reconcile open orders before deciding what to do next.
+        if self.order_manager is not None:
+            self.order_manager.refresh()
+
         # Collect signals from all strategies
         signals = []
         for strategy in self.strategies:
@@ -170,8 +175,12 @@ class StrategyRunner:
         # Get prices
         prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}
 
-        # Get current positions
+        # Get current positions, plus conservative adjustments from outstanding orders
         current_pos = {t: portfolio.get(t, {}).get('position', 0) for t in self.market.all_tickers}
+        if self.order_manager is not None:
+            adj = self.order_manager.effective_position_adjustments()
+            for t, d in adj.items():
+                current_pos[t] = current_pos.get(t, 0) + d
 
         # Allocate (returns target positions and list of active strategy names)
         target_pos, active_names = self.allocator.allocate(signals, prices, current_pos)
@@ -180,7 +189,21 @@ class StrategyRunner:
         # NOTE: turnover cap already limits per-tick position changes; don't add a huge deadband here.
         orders = self.allocator.to_orders(target_pos, current_pos, prices, min_delta=1)
 
-        # Execute orders
+        # Execute / reconcile orders via OrderManager (do not assume cancels work)
+        if self.order_manager is not None:
+            desired: dict[str, tuple[OrderAction, int, float | None]] = {}
+            for o in orders:
+                side = OrderAction.BUY if o.side == "BUY" else OrderAction.SELL
+                desired[o.ticker] = (side, int(o.quantity), float(o.price))
+            self.order_manager.reconcile_target_orders(desired)
+            if orders:
+                reason = f'active: {", ".join(active_names)}' if active_names else 'flattening'
+                logging.info('Allocator: desired %d orders | %s', len(orders), reason)
+                return [Signal('allocator', 'trade', orders, reason=reason)]
+            reason = f'active: {", ".join(active_names)}' if active_names else 'no signals above threshold'
+            return [Signal('allocator', 'hold', reason=reason)]
+
+        # Fallback: direct execution (dry_run / no client)
         if orders:
             reason = f'active: {", ".join(active_names)}' if active_names else 'flattening'
             alloc_signal = Signal('allocator', 'trade', orders, reason=reason)
@@ -258,16 +281,13 @@ class StrategyRunner:
             logging.info('[DRY RUN] allocator: %s %d %s @ %.2f',
                          order.side, qty, order.ticker, order.price)
         else:
-            try:
-                resp = self.client.place_order(
-                    order.ticker,
-                    OrderType.LIMIT,
-                    qty,
-                    action,
-                    price=order.price,
-                )
-                logging.info('allocator: %s %d %s @ %.2f -> order_id=%s',
-                             order.side, qty, order.ticker, order.price,
-                             resp.get('order_id') if isinstance(resp, dict) else resp)
-            except Exception as e:
-                logging.error('allocator: order failed: %s', e)
+            resp = self.client.place_order(
+                order.ticker,
+                OrderType.LIMIT,
+                qty,
+                action,
+                price=order.price,
+            )
+            logging.info('allocator: %s %d %s @ %.2f -> order_id=%s',
+                         order.side, qty, order.ticker, order.price,
+                         resp.get('order_id') if isinstance(resp, dict) else resp)
