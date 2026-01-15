@@ -205,8 +205,11 @@ class StrategyRunner:
             hb = p.beta * (pa / pb) if pb > 0 else 1.0
             # legs for +1 unit SHORT spread: sell a, buy b
             legs = {p.a: -1.0, p.b: hb}
-            s_dollars = spread * pa
-            entry_dollars = p.pyramid.first_entry * pa
+            if p.std <= 0:
+                raise ValueError(f"invalid std for {p.strategy_id}: {p.std}")
+            z = spread / p.std
+            s_dollars = float(z) * float(pa)
+            entry_dollars = float(p.pyramid.first_entry) * float(pa)
             rt_cost_dollars = abs(legs[p.a]) * float(width.get(p.a, 0.0)) + abs(legs[p.b]) * float(width.get(p.b, 0.0))
             return AllocSignal(
                 name=strategy.strategy_id,

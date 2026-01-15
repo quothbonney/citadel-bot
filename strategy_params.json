@@ -11,7 +11,7 @@
       "ETF": 300000
     },
     "turnover_k": 50000,
-    "min_threshold": 0.05,
+    "min_threshold": 0.02,
     "top_n": 4,
     "horizon_bars": 10,
     "switch_lambda": 0.10,

@@ -124,7 +124,10 @@ class StrategyInspector:
                 pb = prices.get(p.b, 1.0)
                 hb = p.beta * (pa / pb) if pb > 0 else 1.0
                 legs = {p.a: -1.0, p.b: hb}
-                s_dollars = float(spread) * float(pa)
+                if p.std <= 0:
+                    raise ValueError(f"invalid std for {p.strategy_id}: {p.std}")
+                z = float(spread) / float(p.std)
+                s_dollars = float(z) * float(pa)
                 entry_dollars = float(p.pyramid.first_entry) * float(pa)
                 rt_cost_dollars = abs(legs[p.a]) * float(width.get(p.a, 0.0)) + abs(legs[p.b]) * float(width.get(p.b, 0.0))
                 sigs.append(AllocSignal(
@@ -514,6 +517,7 @@ def create_app(
       const sigma = diag.sigma_hat || {};
       const netRaw = diag.net_raw || {};
       const ratio = diag.regime_ratio || {};
+      const inputs = diag.inputs || {};
       const active = (diag.active || a.active || []).join(", ");
 
       const names = Array.from(new Set([].concat(Object.keys(weights), Object.keys(edges), Object.keys(sigma), Object.keys(netRaw), Object.keys(ratio))))
@@ -524,6 +528,9 @@ def create_app(
           <td>${n}</td>
           <td>${(weights[n] || 0).toFixed(3)}</td>
           <td>${(edges[n] || 0).toFixed(3)}</td>
+          <td>${fmt((inputs[n] && inputs[n].s_dollars) || 0, 2)}</td>
+          <td>${fmt((inputs[n] && inputs[n].entry_dollars) || 0, 2)}</td>
+          <td>${fmt((inputs[n] && inputs[n].rt_cost_dollars) || 0, 4)}</td>
           <td>${fmt(netRaw[n] || 0, 2)}</td>
           <td>${fmt(sigma[n] || 0, 3)}</td>
           <td>${(ratio[n] || 0).toFixed(2)}</td>
@@ -537,7 +544,7 @@ def create_app(
         <div class="card">
           <div><b>Reason</b>: ${reason} | <b>Active</b>: ${active || "none"} | <b>Orders</b>: ${orderCount}</div>
           <table style="margin-top:8px">
-            <thead><tr><th>Book</th><th>w</th><th>edge</th><th>net$</th><th>sigma</th><th>sigma/med</th></tr></thead>
+            <thead><tr><th>Book</th><th>w</th><th>edge</th><th>S$</th><th>entry$</th><th>rt_cost$</th><th>net$</th><th>sigma</th><th>sigma/med</th></tr></thead>
             <tbody>${rows || ""}</tbody>
           </table>
         </div>

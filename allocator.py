@@ -80,6 +80,7 @@ class Allocator:
         self._last_s: dict[str, float] = {}
         self._var_s: dict[str, float] = {}  # EWMA variance of ΔS per signal
         self._last_diag: dict[str, object] = {}
+        self._last_inputs: dict[str, dict[str, float]] = {}
 
     def allocate(
         self,
@@ -102,6 +103,11 @@ class Allocator:
             self._last_diag = {"reason": "below_min_threshold"}
             return self._flatten(current_pos), []
 
+        self._last_inputs = {
+            s.name: {"s_dollars": float(s.s_dollars), "entry_dollars": float(s.entry_dollars), "rt_cost_dollars": float(s.rt_cost_dollars)}
+            for s in signals
+        }
+
         # Compute edges for all provided signals
         edges, sigma_hat, median_sigma, regime_ratio, net_raw = self._compute_edges(signals)
         if not edges:
@@ -112,6 +118,7 @@ class Allocator:
                 "median_sigma": median_sigma,
                 "regime_ratio": regime_ratio,
                 "net_raw": net_raw,
+                "inputs": self._last_inputs,
             }
             return self._flatten(current_pos), []
 
@@ -174,6 +181,7 @@ class Allocator:
             "median_sigma": median_sigma,
             "regime_ratio": regime_ratio,
             "net_raw": net_raw,
+            "inputs": self._last_inputs,
         }
         return pos, active_names
     
