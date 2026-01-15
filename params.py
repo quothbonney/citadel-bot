@@ -58,6 +58,7 @@ class PairCointParams:
 class EtfNavParams:
     """Parameters for ETF-NAV arbitrage strategy."""
     pyramid: PyramidParams  # Entry/exit levels and sizes
+    std: float = 0.05       # Standard deviation of spread (for strength calculation)
     eod_flat: bool = False  # Flatten at end of day (tick 390)
     enabled: bool = True
 
@@ -73,9 +74,13 @@ class AllocatorConfig:
     net_limit: float = 10_000_000.0
     max_shares: dict[str, int] | None = None
     turnover_k: float = 50_000.0
-    min_threshold: float = 0.12  # Minimum |spread| to be considered
+    min_threshold: float = 0.05  # Minimum |spread| to be considered
     top_n: int = 4  # Max signals to allocate to
     enabled: bool = True
+    # Risk management
+    max_hold_ticks: int = 0       # Force exit after N ticks (0 = disabled)
+    exit_threshold: float = 0.0   # Exit when |spread| drops below this (0 = use min_threshold)
+    max_adverse_std: float = 0.0  # Exit if spread moves this many std devs against us
 
 
 @dataclass
@@ -105,6 +110,7 @@ class StrategyParams:
             elif s.get('type') == 'etf_nav':
                 etf_nav = EtfNavParams(
                     pyramid=_parse_pyramid(s['pyramid']),
+                    std=s.get('std', 0.05),
                     eod_flat=s.get('eod_flat', False),
                     enabled=s.get('enabled', True),
                 )
@@ -121,6 +127,10 @@ class StrategyParams:
                 min_threshold=a.get('min_threshold', 0.12),
                 top_n=a.get('top_n', 4),
                 enabled=a.get('enabled', True),
+                # Risk management
+                max_hold_ticks=a.get('max_hold_ticks', 0),
+                exit_threshold=a.get('exit_threshold', 0.0),
+                max_adverse_std=a.get('max_adverse_std', 0.0),
             )
 
         return cls(

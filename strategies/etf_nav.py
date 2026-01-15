@@ -187,7 +187,7 @@ class EtfNavStrategy(SpreadStrategy, PyramidMixin):
         return StrategySpec(
             name='ETF-NAV',
             signal=spread_adj,  # + = ETF overvalued = short spread (in dollars)
-            sigma=self.params.pyramid.first_entry,  # Entry threshold as sigma
+            sigma=self.params.std,  # Standard deviation for strength calculation
             build_pos=self._build_pos_per_unit,
         )
 

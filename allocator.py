@@ -50,6 +50,11 @@ class AllocatorConfig:
     min_threshold: float = 0.12   # Minimum |spread| to be considered
     top_n: int = 4                # Max number of signals to allocate to
 
+    # Risk management - exit losing positions
+    max_hold_ticks: int = 0       # Force exit after N ticks (0 = disabled)
+    exit_threshold: float = 0.0   # Exit when |spread| drops below this (0 = use min_threshold)
+    max_adverse_std: float = 0.0  # Exit if spread moves this many std devs against us
+
 
 class PortfolioAllocator:
     """Weighted top-N portfolio allocation.
@@ -71,6 +76,12 @@ class PortfolioAllocator:
         self.width = width or {}
         self._prev_pos: dict[str, float] = {leg: 0.0 for leg in self.LEGS}
 
+        # Risk management state - track entry conditions per strategy
+        self._entry_tick: dict[str, int] = {}      # tick when we entered each position
+        self._entry_signal: dict[str, float] = {}  # signal value at entry (to detect adverse moves)
+        self._entry_sigma: dict[str, float] = {}   # sigma at entry (for max_adverse_std)
+        self._current_tick: int = 0
+
         # Compute max delta shares from turnover budget
         self._max_dshares = {}
         for leg in self.LEGS:
@@ -85,6 +96,7 @@ class PortfolioAllocator:
         specs: list[StrategySpec],
         prices: dict[str, float],
         current_pos: dict[str, float] | None = None,
+        tick: int | None = None,
     ) -> tuple[dict[str, float], list[str]]:
         """Allocate positions to top signals above threshold.
 
@@ -92,15 +104,41 @@ class PortfolioAllocator:
             specs: List of all strategy specs (will be filtered/ranked)
             prices: Current mid prices per ticker
             current_pos: Current positions (for turnover cap)
+            tick: Current tick number (for time-based exits)
 
         Returns:
             Tuple of (target positions dict, list of active strategy names)
         """
-        # 1. Filter by minimum threshold
-        eligible = [s for s in specs if s.abs_signal >= self.config.min_threshold]
+        # Update tick counter
+        if tick is not None:
+            self._current_tick = tick
+        else:
+            self._current_tick += 1
+
+        # Build lookup for risk checks
+        spec_by_name = {s.name: s for s in specs}
+
+        # 1. Apply risk filters to existing positions
+        forced_exits = self._check_risk_exits(spec_by_name)
+
+        # 2. Filter by strength threshold (normalized across all strategies)
+        exit_thresh = self.config.exit_threshold if self.config.exit_threshold > 0 else self.config.min_threshold
+        eligible = []
+        for s in specs:
+            if s.name in forced_exits:
+                continue  # Risk stop triggered
+            if s.name in self._entry_tick:
+                # Existing position - use exit threshold (easier to stay)
+                if s.strength >= exit_thresh:
+                    eligible.append(s)
+            else:
+                # New position - use entry threshold (harder to enter)
+                if s.strength >= self.config.min_threshold:
+                    eligible.append(s)
 
         if not eligible:
             # No signals above threshold - flatten positions
+            self._clear_entry_state()
             return self._flatten_positions(current_pos), []
 
         # 2. Rank by strength and take top N
@@ -115,12 +153,9 @@ class PortfolioAllocator:
 
         # 4. Allocate gross across top signals
         pos = {leg: 0.0 for leg in self.LEGS}
-        agg_dir = 0.0
 
         for spec, weight in zip(top_specs, weights):
             d = spec.direction
-            agg_dir += weight * d
-
             unit_pos = spec.build_pos(prices)
             g_unit = self._gross(unit_pos, prices)
 
@@ -131,20 +166,15 @@ class PortfolioAllocator:
                     if leg in pos:
                         pos[leg] += shares * units
 
-        # 5. Add IND to hit net target
-        net_target = np.sign(agg_dir) * self.config.net_limit if agg_dir != 0 else 0.0
-        net_now = self._net(pos, prices)
-        ind_price = prices.get('IND', 1.0)
-        if ind_price > 0:
-            ind_delta = (net_target - net_now) / ind_price
-            pos['IND'] += ind_delta
-
-        # 6. Project into constraints
+        # 5. Project into constraints
         pos = self._project_to_limits(pos, prices)
 
         # 7. Apply turnover cap
         prev = current_pos or self._prev_pos
         pos = self._apply_turnover_cap(prev, pos)
+
+        # 8. Update entry tracking for new positions, clean up exited
+        self._update_entry_state(top_specs, spec_by_name)
 
         self._prev_pos = pos.copy()
         return pos, active_names
@@ -154,6 +184,75 @@ class PortfolioAllocator:
         prev = current_pos or self._prev_pos
         target = {leg: 0.0 for leg in self.LEGS}
         return self._apply_turnover_cap(prev, target)
+
+    def _check_risk_exits(self, spec_by_name: dict[str, StrategySpec]) -> set[str]:
+        """Check which positions should be force-exited due to risk limits.
+
+        Returns:
+            Set of strategy names that should be exited
+        """
+        forced_exits: set[str] = set()
+
+        for name in list(self._entry_tick.keys()):
+            spec = spec_by_name.get(name)
+            if spec is None:
+                # Strategy no longer providing signal - exit
+                forced_exits.add(name)
+                continue
+
+            # Check time-based exit
+            if self.config.max_hold_ticks > 0:
+                ticks_held = self._current_tick - self._entry_tick[name]
+                if ticks_held >= self.config.max_hold_ticks:
+                    forced_exits.add(name)
+                    continue
+
+            # Check max adverse spread movement
+            if self.config.max_adverse_std > 0:
+                entry_signal = self._entry_signal.get(name, 0)
+                entry_sigma = self._entry_sigma.get(name, 1)
+
+                # Adverse = spread moved in wrong direction
+                # If we went long spread (signal < 0), adverse is signal going more negative
+                # If we went short spread (signal > 0), adverse is signal going more positive
+                if entry_signal != 0 and entry_sigma > 0:
+                    # Calculate how much spread moved against us
+                    if entry_signal > 0:
+                        # Short spread - adverse is signal increasing
+                        adverse_move = spec.signal - entry_signal
+                    else:
+                        # Long spread - adverse is signal decreasing (more negative)
+                        adverse_move = entry_signal - spec.signal
+
+                    if adverse_move > self.config.max_adverse_std * entry_sigma:
+                        forced_exits.add(name)
+                        continue
+
+        return forced_exits
+
+    def _update_entry_state(self, active_specs: list[StrategySpec], spec_by_name: dict[str, StrategySpec]) -> None:
+        """Track entry conditions for new positions, clean up exited ones."""
+        active_names = {s.name for s in active_specs}
+
+        # Record entry for new positions
+        for spec in active_specs:
+            if spec.name not in self._entry_tick:
+                self._entry_tick[spec.name] = self._current_tick
+                self._entry_signal[spec.name] = spec.signal
+                self._entry_sigma[spec.name] = spec.sigma
+
+        # Clean up exited positions
+        for name in list(self._entry_tick.keys()):
+            if name not in active_names:
+                self._entry_tick.pop(name, None)
+                self._entry_signal.pop(name, None)
+                self._entry_sigma.pop(name, None)
+
+    def _clear_entry_state(self) -> None:
+        """Clear all entry tracking state (when fully flat)."""
+        self._entry_tick.clear()
+        self._entry_signal.clear()
+        self._entry_sigma.clear()
 
     def positions_to_orders(
         self,
@@ -251,3 +350,5 @@ class PortfolioAllocator:
     def reset(self):
         """Reset allocator state (e.g., at start of new period)."""
         self._prev_pos = {leg: 0.0 for leg in self.LEGS}
+        self._clear_entry_state()
+        self._current_tick = 0

@@ -41,11 +41,18 @@ class StrategyRunner:
                 turnover_k=params.allocator.turnover_k,
                 min_threshold=params.allocator.min_threshold,
                 top_n=params.allocator.top_n,
+                # Risk management
+                max_hold_ticks=params.allocator.max_hold_ticks,
+                exit_threshold=params.allocator.exit_threshold,
+                max_adverse_std=params.allocator.max_adverse_std,
             )
             self.allocator = PortfolioAllocator(config, params.width)
             logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM min_thresh=%.2f top_n=%d',
                          config.gross_limit / 1e6, config.net_limit / 1e6,
                          config.min_threshold, config.top_n)
+            if config.max_hold_ticks > 0 or config.max_adverse_std > 0:
+                logging.info('Risk limits: max_hold=%d exit_thresh=%.3f max_adverse=%.1f std',
+                             config.max_hold_ticks, config.exit_threshold, config.max_adverse_std)
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -161,8 +168,11 @@ class StrategyRunner:
         # Get current positions
         current_pos = {t: portfolio.get(t, {}).get('position', 0) for t in self.market.all_tickers}
 
+        # Get current tick for time-based risk management
+        tick = case.get('tick', 0)
+
         # Allocate (returns target positions and list of active strategy names)
-        target_pos, active_names = self.allocator.allocate(specs, prices, current_pos)
+        target_pos, active_names = self.allocator.allocate(specs, prices, current_pos, tick=tick)
 
         # Convert to orders
         orders = self.allocator.positions_to_orders(target_pos, current_pos, prices)

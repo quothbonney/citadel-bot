@@ -11,13 +11,17 @@
       "ETF": 300000
     },
     "turnover_k": 50000,
-    "min_threshold": 0.12,
+    "min_threshold": 0.5,
     "top_n": 4,
-    "enabled": true
+    "enabled": true,
+    "max_hold_ticks": 100,
+    "exit_threshold": 0.1,
+    "max_adverse_std": 2.0
   },
   "strategies": [
     {
       "type": "etf_nav",
+      "std": 0.05,
       "pyramid": {
         "entry_levels": [0.12, 0.16, 0.20],
         "entry_sizes": [1, 1, 1],

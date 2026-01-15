@@ -14,7 +14,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import empyrical as ep
+
+# Optional empyrical import
+try:
+    import empyrical as ep
+    HAS_EMPYRICAL = True
+except ImportError:
+    HAS_EMPYRICAL = False
 
 from log_config import init_logging
 from market import market
@@ -216,7 +222,7 @@ class BacktestRunner:
         return signals
 
     def _compute_metrics(self, pnl_curve: list[float]) -> dict:
-        """Compute risk metrics from PnL curve using empyrical."""
+        """Compute risk metrics from PnL curve."""
         if len(pnl_curve) < 2:
             return {}
 
@@ -232,13 +238,36 @@ class BacktestRunner:
         drawdowns = pnl - running_max
         max_dd = drawdowns.min()
 
-        return {
-            'sharpe': ep.sharpe_ratio(returns),
-            'sortino': ep.sortino_ratio(returns),
-            'max_drawdown': max_dd,  # Dollar value, not percentage
-            'annual_return': ep.annual_return(returns),
-            'annual_volatility': ep.annual_volatility(returns),
+        # Compute Sharpe ratio manually (annualized, assuming 390 ticks per day)
+        if returns.std() > 0:
+            sharpe = returns.mean() / returns.std() * np.sqrt(252 * 390)
+        else:
+            sharpe = 0.0
+
+        # Compute Sortino (downside deviation)
+        downside = returns[returns < 0]
+        if len(downside) > 0 and downside.std() > 0:
+            sortino = returns.mean() / downside.std() * np.sqrt(252 * 390)
+        else:
+            sortino = sharpe  # fallback
+
+        result = {
+            'sharpe': sharpe,
+            'sortino': sortino,
+            'max_drawdown': max_dd,
         }
+
+        # Use empyrical if available for more accurate metrics
+        if HAS_EMPYRICAL:
+            try:
+                result['sharpe'] = ep.sharpe_ratio(returns)
+                result['sortino'] = ep.sortino_ratio(returns)
+                result['annual_return'] = ep.annual_return(returns)
+                result['annual_volatility'] = ep.annual_volatility(returns)
+            except Exception:
+                pass  # Keep manual calculations
+
+        return result
 
     def summary(self) -> None:
         """Print backtest summary."""
@@ -298,11 +327,34 @@ def main() -> None:
 
     init_logging(console_level='DEBUG' if args.verbose else 'WARNING')
 
-    # Default session path
+    # Default session path - search common locations
     if args.session:
         session_path = Path(args.session)
     else:
-        session_path = Path('/Users/wudd/Downloads/data/20260114_182237_Citadel_Securities_Quant_Invitational_2025_Trading_Competition')
+        # Try to find a session in common locations
+        search_paths = [
+            Path.home() / 'Downloads',
+            Path.home() / 'Desktop',
+            Path.cwd() / 'data',
+            Path.cwd(),
+        ]
+        session_path = None
+        for base in search_paths:
+            if not base.exists():
+                continue
+            # Look for directories with 'Citadel' or session-like names
+            candidates = sorted([
+                d for d in base.iterdir()
+                if d.is_dir() and ('Citadel' in d.name or (d / 'meta.json').exists())
+            ], key=lambda x: x.stat().st_mtime, reverse=True)
+            if candidates:
+                session_path = candidates[0]
+                break
+
+        if session_path is None:
+            print('No session found. Please provide a session path.')
+            print('Usage: python backtest.py /path/to/session')
+            sys.exit(1)
 
     if not session_path.exists():
         print(f'Session not found: {session_path}')
@@ -322,12 +374,12 @@ def main() -> None:
     # Run backtest
     bt = BacktestRunner(params, scale=args.scale)
 
-    # Debug: collect stats
-    debug_data = {
-        'pair_BBB_DDD': {'z': [], 'z_adj': [], 'dollar_mag': [], 'entries': [], 'exits': []},
-        'pair_AAA_DDD': {'z': [], 'z_adj': [], 'dollar_mag': [], 'entries': [], 'exits': []},
-        'etf_nav': {'spread': [], 'spread_adj': [], 'entries': [], 'exits': []},
-    }
+    # Debug: collect stats for all strategies
+    debug_data = {}
+    for strat in bt.runner.strategies:
+        debug_data[strat.strategy_id] = {'entries': [], 'exits': []}
+    if bt.runner.allocator:
+        debug_data['allocator'] = {'entries': [], 'exits': []}
 
     tick_count = 0
     for tick in session.ticks():
@@ -339,28 +391,6 @@ def main() -> None:
             for ticker, pos in bt.positions['allocator'].items():
                 if ticker in portfolio:
                     portfolio[ticker]['position'] = pos.quantity
-
-        # Collect debug info before processing
-        if args.debug:
-            import math
-            # BBB-DDD
-            p = params.pair_coint[0]  # BBB-DDD
-            price_a = (portfolio['BBB']['bid'] + portfolio['BBB']['ask']) / 2
-            price_b = (portfolio['DDD']['bid'] + portfolio['DDD']['ask']) / 2
-            z = math.log(price_a) - (p.c + p.beta * math.log(price_b))
-            debug_data['pair_BBB_DDD']['z'].append(z)
-
-            # AAA-DDD
-            p2 = params.pair_coint[1]  # AAA-DDD
-            price_a2 = (portfolio['AAA']['bid'] + portfolio['AAA']['ask']) / 2
-            z2 = math.log(price_a2) - (p2.c + p2.beta * math.log(price_b))
-            debug_data['pair_AAA_DDD']['z'].append(z2)
-
-            # ETF-NAV
-            etf_mid = (portfolio['ETF']['bid'] + portfolio['ETF']['ask']) / 2
-            nav = sum((portfolio[s]['bid'] + portfolio[s]['ask']) / 2 for s in ['AAA', 'BBB', 'CCC', 'DDD']) / 4
-            spread = etf_mid - nav
-            debug_data['etf_nav']['spread'].append(spread)
 
         signals = bt.process_tick(portfolio, case, tick_num=tick_count, trace_first_n=args.trace)
 
@@ -382,24 +412,22 @@ def main() -> None:
     # Print debug stats
     if args.debug:
         print('\n' + '=' * 60)
-        print('DEBUG: Signal Statistics')
+        print('DEBUG: Trade Activity')
         print('=' * 60)
 
         for sid, data in debug_data.items():
+            entries = data.get('entries', [])
+            exits = data.get('exits', [])
+            if not entries and not exits:
+                continue
             print(f'\n{sid}:')
-            if 'z' in data and data['z']:
-                z_arr = np.array(data['z'])
-                print(f'  z:        mean={z_arr.mean():.6f}  std={z_arr.std():.6f}  min={z_arr.min():.6f}  max={z_arr.max():.6f}')
-            if 'spread' in data and data['spread']:
-                s_arr = np.array(data['spread'])
-                print(f'  spread:   mean={s_arr.mean():.4f}  std={s_arr.std():.4f}  min={s_arr.min():.4f}  max={s_arr.max():.4f}')
-            print(f'  entries:  {len(data.get("entries", []))}')
-            print(f'  exits:    {len(data.get("exits", []))}')
+            print(f'  entries:  {len(entries)}')
+            print(f'  exits:    {len(exits)}')
 
             # Show first few entries
-            if data.get('entries'):
+            if entries:
                 print(f'  first 5 entries:')
-                for i, (t, action, reason) in enumerate(data['entries'][:5]):
+                for t, action, reason in entries[:5]:
                     print(f'    tick {t}: {action} - {reason}')
 
 
