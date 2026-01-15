@@ -11,7 +11,8 @@
       "ETF": 300000
     },
     "turnover_k": 50000,
-    "net_mode": "signal",
+    "min_threshold": 0.12,
+    "top_n": 4,
     "enabled": true
   },
   "strategies": [
@@ -28,16 +29,61 @@
     },
     {
       "type": "pair_coint",
+      "a": "IND",
+      "b": "AAA",
+      "c": 0.313924,
+      "beta": 0.812561,
+      "std": 0.008484,
+      "pyramid": {
+        "entry_levels": [0.072206, 0.090257, 0.108309],
+        "entry_sizes": [1, 1, 1],
+        "exit_levels": [0.0],
+        "stop_loss": 0.198566
+      },
+      "enabled": true
+    },
+    {
+      "type": "pair_coint",
+      "a": "IND",
+      "b": "DDD",
+      "c": 0.661541,
+      "beta": 0.793935,
+      "std": 0.017664,
+      "pyramid": {
+        "entry_levels": [0.061404, 0.076755, 0.092106],
+        "entry_sizes": [1, 1, 1],
+        "exit_levels": [0.0],
+        "stop_loss": 0.168861
+      },
+      "enabled": true
+    },
+    {
+      "type": "pair_coint",
+      "a": "AAA",
+      "b": "BBB",
+      "c": -0.063236,
+      "beta": 0.945996,
+      "std": 0.038275,
+      "pyramid": {
+        "entry_levels": [0.157439, 0.196799, 0.236158],
+        "entry_sizes": [1, 1, 1],
+        "exit_levels": [0.0],
+        "stop_loss": 0.432957
+      },
+      "enabled": true
+    },
+    {
+      "type": "pair_coint",
       "a": "BBB",
       "b": "DDD",
-      "c": 1.587696,
-      "beta": 0.8166319280179314,
-      "std": 0.008830,
+      "c": 1.62477,
+      "beta": 0.816632,
+      "std": 0.030313,
       "pyramid": {
-        "entry_levels": [0.12],
-        "entry_sizes": [1],
+        "entry_levels": [0.115767, 0.162074, 0.20838],
+        "entry_sizes": [1, 1, 1],
         "exit_levels": [0.0],
-        "stop_loss": null
+        "stop_loss": 0.439914
       },
       "enabled": true
     },

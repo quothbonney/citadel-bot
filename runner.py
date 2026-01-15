@@ -39,11 +39,13 @@ class StrategyRunner:
                 net_limit=params.allocator.net_limit,
                 max_shares=params.allocator.max_shares or mkt.max_shares,
                 turnover_k=params.allocator.turnover_k,
-                net_mode=params.allocator.net_mode,
+                min_threshold=params.allocator.min_threshold,
+                top_n=params.allocator.top_n,
             )
             self.allocator = PortfolioAllocator(config, params.width)
-            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM',
-                         config.gross_limit / 1e6, config.net_limit / 1e6)
+            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM min_thresh=%.2f top_n=%d',
+                         config.gross_limit / 1e6, config.net_limit / 1e6,
+                         config.min_threshold, config.top_n)
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -145,24 +147,13 @@ class StrategyRunner:
         return signals
 
     def _on_tick_allocated(self, portfolio: dict, case: dict) -> list[Signal]:
-        """Process tick with coordinated allocation across strategies."""
-        # First, run compute_signal on all strategies to update their state
-        strategy_signals = []
-        for strategy in self.strategies:
-            signal = strategy.compute_signal(portfolio, case)
-            strategy_signals.append(signal)
-            if signal.action != 'hold':
-                logging.debug('%s: %s (%s)', signal.strategy_id, signal.action, signal.reason)
-
-        # Collect signal specs from active strategies
+        """Process tick with top-N weighted allocation."""
+        # Collect signal specs from ALL strategies (allocator decides which to use)
         specs = []
         for strategy in self.strategies:
             spec = strategy.get_signal_spec(portfolio, case)
             if spec is not None:
                 specs.append(spec)
-
-        if not specs:
-            return [Signal('allocator', 'hold', reason='no active signals')]
 
         # Get prices
         prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}
@@ -170,21 +161,23 @@ class StrategyRunner:
         # Get current positions
         current_pos = {t: portfolio.get(t, {}).get('position', 0) for t in self.market.all_tickers}
 
-        # Allocate
-        target_pos = self.allocator.allocate(specs, prices, current_pos)
+        # Allocate (returns target positions and list of active strategy names)
+        target_pos, active_names = self.allocator.allocate(specs, prices, current_pos)
 
         # Convert to orders
         orders = self.allocator.positions_to_orders(target_pos, current_pos, prices)
 
         # Execute orders
         if orders:
-            alloc_signal = Signal('allocator', 'trade', orders, reason=f'{len(specs)} signals')
+            reason = f'active: {", ".join(active_names)}' if active_names else 'flattening'
+            alloc_signal = Signal('allocator', 'trade', orders, reason=reason)
             for order in orders:
                 self._execute_allocator_order(portfolio, order)
-            logging.info('Allocator: %d orders from %d signals', len(orders), len(specs))
+            logging.info('Allocator: %d orders | %s', len(orders), reason)
             return [alloc_signal]
 
-        return [Signal('allocator', 'hold', reason=f'{len(specs)} signals, no rebalance')]
+        reason = f'active: {", ".join(active_names)}' if active_names else 'no signals above threshold'
+        return [Signal('allocator', 'hold', reason=reason)]
 
     def _execute_allocator_order(self, portfolio: dict, order) -> None:
         """Execute a single allocator order."""

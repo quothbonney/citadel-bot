@@ -1,7 +1,7 @@
 """Portfolio allocator for multi-signal coordination.
 
-Aggregates signals from multiple strategies and allocates gross budget
-proportionally to |signal|/(sigma+eps), using IND as net exposure knob.
+Weighted top-N allocation: ranks signals by strength, allocates to the
+top signals that exceed the minimum threshold.
 """
 from __future__ import annotations
 
@@ -16,15 +16,25 @@ if TYPE_CHECKING:
 
 @dataclass
 class StrategySpec:
-    """Per-strategy allocation input."""
+    """Per-strategy signal input."""
     name: str
-    signal: float               # Scalar signal (+ = short spread, - = long spread)
-    sigma: float                # Risk proxy (entry threshold)
-    build_pos: Callable[[dict], dict]  # prices → shares dict for +1 unit
-    direction: int = 0          # +1 = long spread, -1 = short spread
+    signal: float               # Spread value (+ = short spread, - = long spread)
+    sigma: float                # Normalization factor (e.g., std dev)
+    build_pos: Callable[[dict], dict]  # prices → shares dict for +1 unit of short spread
 
-    def __post_init__(self):
-        self.direction = int(np.sign(self.signal)) if self.signal != 0 else 0
+    @property
+    def abs_signal(self) -> float:
+        return abs(self.signal)
+
+    @property
+    def direction(self) -> int:
+        """Direction for position: +1 if signal > 0 (short spread), -1 if signal < 0 (long spread)."""
+        return int(np.sign(self.signal)) if self.signal != 0 else 0
+
+    @property
+    def strength(self) -> float:
+        """Signal strength for ranking."""
+        return self.abs_signal / (self.sigma + 1e-9)
 
 
 @dataclass
@@ -37,19 +47,20 @@ class AllocatorConfig:
         'CCC': 200_000, 'DDD': 200_000, 'ETF': 300_000,
     })
     turnover_k: float = 50_000.0  # Max $ turnover per tick
-    net_mode: str = 'signal'  # 'signal' or 'momentum'
+    min_threshold: float = 0.12   # Minimum |spread| to be considered
+    top_n: int = 4                # Max number of signals to allocate to
 
 
 class PortfolioAllocator:
-    """Multi-signal portfolio allocation with constraints.
+    """Weighted top-N portfolio allocation.
 
     Algorithm:
-    1. Compute weights: w_i = |signal_i| / (sigma_i + eps)
-    2. Allocate gross: units_i = (w_i / sum(w)) * gross_limit / g_unit_i
-    3. Build combined position (non-IND legs)
-    4. Add IND to hit net target
-    5. Project into constraints (gross, net, max shares)
-    6. Apply turnover cap
+    1. Filter signals by min_threshold
+    2. Rank by strength = |signal| / sigma
+    3. Take top N signals
+    4. Allocate gross proportionally to strength
+    5. Add IND to hit net target
+    6. Apply constraints (gross, net, max shares, turnover)
     """
 
     LEGS = ['ETF', 'AAA', 'BBB', 'CCC', 'DDD', 'IND']
@@ -74,51 +85,53 @@ class PortfolioAllocator:
         specs: list[StrategySpec],
         prices: dict[str, float],
         current_pos: dict[str, float] | None = None,
-    ) -> dict[str, float]:
-        """Allocate positions across active strategies.
+    ) -> tuple[dict[str, float], list[str]]:
+        """Allocate positions to top signals above threshold.
 
         Args:
-            specs: List of active strategy specs
+            specs: List of all strategy specs (will be filtered/ranked)
             prices: Current mid prices per ticker
             current_pos: Current positions (for turnover cap)
 
         Returns:
-            Target positions dict[ticker, shares]
+            Tuple of (target positions dict, list of active strategy names)
         """
-        if not specs:
-            return self._prev_pos.copy()
+        # 1. Filter by minimum threshold
+        eligible = [s for s in specs if s.abs_signal >= self.config.min_threshold]
 
-        # 1. Compute weights: w_i = |signal_i| / (sigma_i + eps)
-        weights = []
-        for spec in specs:
-            w = abs(spec.signal) / (spec.sigma + self.EPS)
-            weights.append(w)
+        if not eligible:
+            # No signals above threshold - flatten positions
+            return self._flatten_positions(current_pos), []
 
-        w_sum = sum(weights)
-        if w_sum < self.EPS:
-            return self._prev_pos.copy()
+        # 2. Rank by strength and take top N
+        eligible.sort(key=lambda s: s.strength, reverse=True)
+        top_specs = eligible[:self.config.top_n]
+        active_names = [s.name for s in top_specs]
 
-        w_frac = [w / w_sum for w in weights]
+        # 3. Compute weights proportional to strength
+        strengths = [s.strength for s in top_specs]
+        total_strength = sum(strengths)
+        weights = [s / total_strength for s in strengths]
 
-        # 2. Allocate gross across strategies
+        # 4. Allocate gross across top signals
         pos = {leg: 0.0 for leg in self.LEGS}
         agg_dir = 0.0
 
-        for spec, frac in zip(specs, w_frac):
+        for spec, weight in zip(top_specs, weights):
             d = spec.direction
-            agg_dir += frac * d
+            agg_dir += weight * d
 
             unit_pos = spec.build_pos(prices)
             g_unit = self._gross(unit_pos, prices)
 
             if g_unit > 0:
                 # Allocate fraction of gross budget to this strategy
-                units = (frac * self.config.gross_limit / g_unit) * d
+                units = (weight * self.config.gross_limit / g_unit) * d
                 for leg, shares in unit_pos.items():
                     if leg in pos:
                         pos[leg] += shares * units
 
-        # 3. Add IND to hit net target
+        # 5. Add IND to hit net target
         net_target = np.sign(agg_dir) * self.config.net_limit if agg_dir != 0 else 0.0
         net_now = self._net(pos, prices)
         ind_price = prices.get('IND', 1.0)
@@ -126,15 +139,21 @@ class PortfolioAllocator:
             ind_delta = (net_target - net_now) / ind_price
             pos['IND'] += ind_delta
 
-        # 4. Project into constraints
+        # 6. Project into constraints
         pos = self._project_to_limits(pos, prices)
 
-        # 5. Apply turnover cap
+        # 7. Apply turnover cap
         prev = current_pos or self._prev_pos
         pos = self._apply_turnover_cap(prev, pos)
 
         self._prev_pos = pos.copy()
-        return pos
+        return pos, active_names
+
+    def _flatten_positions(self, current_pos: dict[str, float] | None) -> dict[str, float]:
+        """Gradually flatten all positions (respecting turnover cap)."""
+        prev = current_pos or self._prev_pos
+        target = {leg: 0.0 for leg in self.LEGS}
+        return self._apply_turnover_cap(prev, target)
 
     def positions_to_orders(
         self,

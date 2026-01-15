@@ -176,10 +176,7 @@ class EtfNavStrategy(SpreadStrategy, PyramidMixin):
     # --- Allocator integration ---
 
     def get_signal_spec(self, portfolio: dict, case: dict) -> StrategySpec | None:
-        """Return allocator input if strategy is active."""
-        if self.state == PositionState.FLAT:
-            return None  # Not active
-
+        """Return allocator input (always, for top-N ranking)."""
         raw = self.compute_spread(portfolio, case)
         if raw is None:
             return None
@@ -189,8 +186,8 @@ class EtfNavStrategy(SpreadStrategy, PyramidMixin):
         from allocator import StrategySpec
         return StrategySpec(
             name='ETF-NAV',
-            signal=spread_adj,  # + = ETF overvalued = short spread
-            sigma=self.params.pyramid.first_entry,
+            signal=spread_adj,  # + = ETF overvalued = short spread (in dollars)
+            sigma=self.params.pyramid.first_entry,  # Entry threshold as sigma
             build_pos=self._build_pos_per_unit,
         )
 

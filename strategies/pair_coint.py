@@ -64,8 +64,8 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
         spread_adj = self._adjust_for_seasonality(raw, case)
         self._spread_adj = spread_adj
 
-        # Convert z-score to dollar magnitude for threshold comparison
-        dollar_mag = abs(spread_adj) * self._price_a
+        # Use absolute z-score for threshold comparison (thresholds are in z-score units)
+        abs_z = abs(spread_adj)
         pyramid = self.params.pyramid
 
         # --- Risk stops (check first) ---
@@ -73,30 +73,30 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
             self._hold_ticks += 1
 
             # Stop loss (from mixin)
-            if self._check_stop_loss(dollar_mag, pyramid):
-                return self._exit_position(f'stop_loss hit: ${dollar_mag:.2f}')
+            if self._check_stop_loss(abs_z, pyramid):
+                return self._exit_position(f'stop_loss hit: z={spread_adj:.4f}')
 
         # --- Entry/Scale logic ---
         if self.state == PositionState.FLAT:
             first_level = pyramid.first_entry
-            if spread_adj > 0 and dollar_mag >= first_level:
+            if spread_adj > 0 and abs_z >= first_level:
                 # z > 0: a overvalued -> short spread
                 self.state = PositionState.SHORT
                 self._entry_hb = self._current_hb
                 size = self._enter_at_level(0, pyramid)
                 orders = self._make_orders(is_long=False, quantity=size)
-                return self.enter_short(orders, self._format_reason(spread_adj, dollar_mag, size))
-            elif spread_adj < 0 and dollar_mag >= first_level:
+                return self.enter_short(orders, self._format_reason(spread_adj, abs_z, size))
+            elif spread_adj < 0 and abs_z >= first_level:
                 # z < 0: a undervalued -> long spread
                 self.state = PositionState.LONG
                 self._entry_hb = self._current_hb
                 size = self._enter_at_level(0, pyramid)
                 orders = self._make_orders(is_long=True, quantity=size)
-                return self.enter_long(orders, self._format_reason(spread_adj, dollar_mag, size))
+                return self.enter_long(orders, self._format_reason(spread_adj, abs_z, size))
 
         elif self.state == PositionState.LONG:
             # Check scale-up (from mixin)
-            scale_result = self._check_scale_up(dollar_mag, pyramid)
+            scale_result = self._check_scale_up(abs_z, pyramid)
             if scale_result is not None:
                 lvl, size = scale_result
                 orders = self._make_orders(is_long=True, quantity=size)
@@ -109,7 +109,7 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
 
         elif self.state == PositionState.SHORT:
             # Check scale-up (from mixin)
-            scale_result = self._check_scale_up(dollar_mag, pyramid)
+            scale_result = self._check_scale_up(abs_z, pyramid)
             if scale_result is not None:
                 lvl, size = scale_result
                 orders = self._make_orders(is_long=False, quantity=size)
@@ -120,7 +120,7 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
             if exit_level is not None:
                 return self._exit_position(f'exit z={spread_adj:.4f}')
 
-        return self.hold(self._format_hold(spread_adj, dollar_mag))
+        return self.hold(self._format_hold(spread_adj, abs_z))
 
     def _exit_position(self, reason: str) -> Signal:
         """Exit entire position and reset state."""
@@ -149,21 +149,21 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
                 Order(b, hb * quantity, 'BUY', self._sec_b.get('ask', self._price_b)),
             ]
 
-    def _format_reason(self, spread_adj: float, dollar_mag: float, size: int) -> str:
-        return f'z={spread_adj:.4f} (${dollar_mag:.2f}) hb={self._current_hb:.2f} size={size}'
+    def _format_reason(self, spread_adj: float, abs_z: float, size: int) -> str:
+        return f'z={spread_adj:.4f} |z|={abs_z:.4f} hb={self._current_hb:.2f} size={size}'
 
-    def _format_hold(self, spread_adj: float, dollar_mag: float) -> str:
-        return f'z={spread_adj:.4f} (${dollar_mag:.2f}) size={self._current_size}'
+    def _format_hold(self, spread_adj: float, abs_z: float) -> str:
+        return f'z={spread_adj:.4f} |z|={abs_z:.4f} size={self._current_size}'
 
     # --- Required abstract methods (for base class compatibility) ---
 
     def check_entry_long(self, spread_adj: float) -> bool:
-        dollar_mag = abs(spread_adj) * self._price_a
-        return spread_adj < 0 and dollar_mag >= self.params.pyramid.first_entry
+        abs_z = abs(spread_adj)
+        return spread_adj < 0 and abs_z >= self.params.pyramid.first_entry
 
     def check_entry_short(self, spread_adj: float) -> bool:
-        dollar_mag = abs(spread_adj) * self._price_a
-        return spread_adj > 0 and dollar_mag >= self.params.pyramid.first_entry
+        abs_z = abs(spread_adj)
+        return spread_adj > 0 and abs_z >= self.params.pyramid.first_entry
 
     def make_entry_orders(self, portfolio: dict, is_long: bool) -> list[Order]:
         return self._make_orders(is_long=is_long, quantity=self.params.pyramid.entry_sizes[0])
@@ -172,12 +172,12 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
         return self._make_orders(is_long=not is_long, quantity=self._current_size, use_entry_hb=True)
 
     def format_entry_reason(self, spread_adj: float) -> str:
-        dollar_mag = abs(spread_adj) * self._price_a
-        return self._format_reason(spread_adj, dollar_mag, self.params.pyramid.entry_sizes[0])
+        abs_z = abs(spread_adj)
+        return self._format_reason(spread_adj, abs_z, self.params.pyramid.entry_sizes[0])
 
     def format_hold_reason(self, spread_adj: float) -> str:
-        dollar_mag = abs(spread_adj) * self._price_a
-        return self._format_hold(spread_adj, dollar_mag)
+        abs_z = abs(spread_adj)
+        return self._format_hold(spread_adj, abs_z)
 
     def on_entry(self) -> None:
         self._entry_hb = self._current_hb
@@ -188,10 +188,7 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
     # --- Allocator integration ---
 
     def get_signal_spec(self, portfolio: dict, case: dict) -> StrategySpec | None:
-        """Return allocator input if strategy is active."""
-        if self.state == PositionState.FLAT:
-            return None  # Not active
-
+        """Return allocator input (always, for top-N ranking)."""
         raw = self.compute_spread(portfolio, case)
         if raw is None:
             return None
@@ -201,8 +198,8 @@ class PairCointStrategy(SpreadStrategy, PyramidMixin):
         from allocator import StrategySpec
         return StrategySpec(
             name=self.strategy_id,
-            signal=spread_adj * self._price_a,  # Dollarized z-score
-            sigma=self.params.pyramid.first_entry,
+            signal=spread_adj,  # Raw z-score (allocator filters by threshold)
+            sigma=self.params.std,  # Use std for normalization
             build_pos=lambda prices: self._build_pos_per_unit(prices),
         )
 

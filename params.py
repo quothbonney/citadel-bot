@@ -73,7 +73,8 @@ class AllocatorConfig:
     net_limit: float = 10_000_000.0
     max_shares: dict[str, int] | None = None
     turnover_k: float = 50_000.0
-    net_mode: str = 'signal'
+    min_threshold: float = 0.12  # Minimum |spread| to be considered
+    top_n: int = 4  # Max signals to allocate to
     enabled: bool = True
 
 
@@ -117,7 +118,8 @@ class StrategyParams:
                 net_limit=a.get('net_limit', 10_000_000.0),
                 max_shares=a.get('max_shares'),
                 turnover_k=a.get('turnover_k', 50_000.0),
-                net_mode=a.get('net_mode', 'signal'),
+                min_threshold=a.get('min_threshold', 0.12),
+                top_n=a.get('top_n', 4),
                 enabled=a.get('enabled', True),
             )
 
