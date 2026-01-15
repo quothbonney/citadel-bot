@@ -45,11 +45,19 @@ class StrategyRunner:
                 switch_lambda=params.allocator.switch_lambda,
                 regime_cutoff=params.allocator.regime_cutoff,
                 w_max=params.allocator.w_max,
+                vol_scale_enabled=params.allocator.vol_scale_enabled,
+                target_vol=params.allocator.target_vol,
+                vol_halflife=params.allocator.vol_halflife,
+                exit_turnover_mult=params.allocator.exit_turnover_mult,
+                dd_throttle_enabled=params.allocator.dd_throttle_enabled,
+                dd_throttle_threshold=params.allocator.dd_throttle_threshold,
+                dd_throttle_factor=params.allocator.dd_throttle_factor,
             )
             self.allocator = Allocator(config)
-            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM top_n=%d horizon=%d lambda=%.2f turnover=%.0f%%',
+            vol_info = f' vol_scale=ON(target=${config.target_vol:,.0f})' if config.vol_scale_enabled else ''
+            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM top_n=%d horizon=%d lambda=%.2f turnover=%.0f%%%s',
                          config.gross_limit / 1e6, config.net_limit / 1e6,
-                         config.top_n, config.horizon_bars, config.switch_lambda, config.turnover_pct * 100)
+                         config.top_n, config.horizon_bars, config.switch_lambda, config.turnover_pct * 100, vol_info)
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""

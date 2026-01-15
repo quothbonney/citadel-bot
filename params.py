@@ -79,6 +79,13 @@ class AllocatorConfig:
     switch_lambda: float = 0.10      # L1 switching penalty in weight space
     regime_cutoff: float = 2.5       # Kill edge when sigma_hat/median > cutoff
     w_max: float = 1.0               # Max weight per signal (0 < w_max <= 1)
+    vol_scale_enabled: bool = False  # Enable portfolio vol scaling
+    target_vol: float = 50_000.0     # Target portfolio vol ($ per tick std dev)
+    vol_halflife: int = 20           # EWMA halflife for realized vol
+    exit_turnover_mult: float = 5.0  # Exit turnover = turnover_pct * this (faster exits)
+    dd_throttle_enabled: bool = False
+    dd_throttle_threshold: float = 100_000.0  # $ drawdown to trigger throttle
+    dd_throttle_factor: float = 0.5  # Reduce entry turnover by this when in DD
     enabled: bool = True
 
 
@@ -128,6 +135,13 @@ class StrategyParams:
                 switch_lambda=a.get('switch_lambda', 0.10),
                 regime_cutoff=a.get('regime_cutoff', 2.5),
                 w_max=a.get('w_max', 1.0),
+                vol_scale_enabled=a.get('vol_scale_enabled', False),
+                target_vol=a.get('target_vol', 50_000.0),
+                vol_halflife=a.get('vol_halflife', 20),
+                exit_turnover_mult=a.get('exit_turnover_mult', 5.0),
+                dd_throttle_enabled=a.get('dd_throttle_enabled', False),
+                dd_throttle_threshold=a.get('dd_throttle_threshold', 100_000.0),
+                dd_throttle_factor=a.get('dd_throttle_factor', 0.5),
                 enabled=a.get('enabled', True),
             )
 

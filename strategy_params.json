@@ -14,9 +14,16 @@
     "min_threshold": 0.0,
     "top_n": 4,
     "horizon_bars": 20,
-    "switch_lambda": 0.25,
+    "switch_lambda": 0.15,
     "regime_cutoff": 2.5,
     "w_max": 0.50,
+    "vol_scale_enabled": false,
+    "target_vol": 25000,
+    "vol_halflife": 20,
+    "exit_turnover_mult": 1.0,
+    "dd_throttle_enabled": false,
+    "dd_throttle_threshold": 100000,
+    "dd_throttle_factor": 0.5,
     "enabled": true
   },
   "strategies": [

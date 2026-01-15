@@ -54,6 +54,19 @@ class AllocatorConfig:
     regime_cutoff: float = 2.5       # Kill edge when sigma_hat / median(sigma_hat) > cutoff
     w_max: float = 1.0               # Upper bound per-weight (<= 1)
 
+    # Portfolio vol scaling
+    vol_scale_enabled: bool = False  # Enable portfolio vol scaling
+    target_vol: float = 50_000.0     # Target portfolio vol ($ per tick std dev)
+    vol_halflife: int = 20           # EWMA halflife for realized vol
+    
+    # Asymmetric turnover: allow faster exits than entries
+    exit_turnover_mult: float = 5.0  # Exit turnover = turnover_pct * this multiplier
+    
+    # Drawdown throttle
+    dd_throttle_enabled: bool = False
+    dd_throttle_threshold: float = 100_000.0  # $ drawdown to trigger throttle
+    dd_throttle_factor: float = 0.5           # Reduce turnover by this factor when in DD
+
 
 TICKERS = ('AAA', 'BBB', 'CCC', 'DDD', 'ETF', 'IND')
 
@@ -81,6 +94,17 @@ class Allocator:
         self._var_s: dict[str, float] = {}  # EWMA variance of ΔS per signal
         self._last_diag: dict[str, object] = {}
         self._last_inputs: dict[str, dict[str, float]] = {}
+        
+        # Portfolio vol scaling state
+        self._last_portfolio_value: float | None = None
+        self._ewma_var: float = 0.0  # EWMA variance of portfolio returns
+        self._vol_scale: float = 1.0  # Current vol scaling factor
+        self._vol_tick_count: int = 0  # Ticks since vol tracking started
+        
+        # Drawdown throttle state
+        self._peak_pnl: float = 0.0
+        self._current_pnl: float = 0.0
+        self._dd_throttle_active: bool = False
 
     def allocate(
         self,
@@ -93,14 +117,18 @@ class Allocator:
         Returns:
             (target_positions, active_strategy_names)
         """
+        # Update portfolio vol scaling
+        if current_pos is not None:
+            self._update_vol_scale(current_pos, prices)
+        
         if not signals:
-            self._last_diag = {"reason": "no_signals"}
+            self._last_diag = {"reason": "no_signals", "vol_scale": self._vol_scale}
             return self._flatten(current_pos), []
 
         # Optional coarse filter
         signals = [s for s in signals if abs(s.s_dollars) >= self.config.min_threshold]
         if not signals:
-            self._last_diag = {"reason": "below_min_threshold"}
+            self._last_diag = {"reason": "below_min_threshold", "vol_scale": self._vol_scale}
             return self._flatten(current_pos), []
 
         self._last_inputs = {
@@ -141,6 +169,9 @@ class Allocator:
         active_names = [n for n, ww in sorted(w.items(), key=lambda kv: kv[1], reverse=True) if ww > 0]
 
         # Allocate: each signal gets weight fraction of gross budget
+        # Apply vol scaling to gross limit
+        effective_gross = self.config.gross_limit * self._vol_scale
+        
         pos = {t: 0.0 for t in TICKERS}
 
         sig_by_name = {s.name: s for s in signals}
@@ -156,7 +187,7 @@ class Allocator:
                 continue
             
             # How many units to allocate (in signal direction)
-            budget = weight * self.config.gross_limit
+            budget = weight * effective_gross
             units = (budget / unit_gross) * sig.direction
             
             # Add to aggregate position
@@ -182,13 +213,72 @@ class Allocator:
             "regime_ratio": regime_ratio,
             "net_raw": net_raw,
             "inputs": self._last_inputs,
+            "vol_scale": self._vol_scale,
+            "effective_gross": effective_gross,
         }
         return pos, active_names
+    
+    def _update_vol_scale(self, current_pos: dict[str, float], prices: dict[str, float]) -> None:
+        """Update portfolio vol scaling factor based on EWMA of portfolio value changes."""
+        if not self.config.vol_scale_enabled:
+            self._vol_scale = 1.0
+            return
+        
+        # Compute current portfolio value (net exposure)
+        portfolio_value = sum(current_pos.get(t, 0) * prices.get(t, 0) for t in TICKERS)
+        
+        # Initialize on first tick with non-zero positions
+        if self._last_portfolio_value is None:
+            if abs(portfolio_value) > 1e-6:
+                self._last_portfolio_value = portfolio_value
+                self._vol_tick_count = 1
+            return
+        
+        # Compute return (change in portfolio value)
+        ret = portfolio_value - self._last_portfolio_value
+        self._last_portfolio_value = portfolio_value
+        self._vol_tick_count += 1
+        
+        # Warmup period: need at least 2x halflife ticks before applying vol scaling
+        warmup_ticks = self.config.vol_halflife * 2
+        if self._vol_tick_count < warmup_ticks:
+            # Still warming up - update EWMA but keep scale at 1.0
+            halflife = max(1, self.config.vol_halflife)
+            alpha = 1.0 - np.exp(-np.log(2) / halflife)
+            self._ewma_var = (1.0 - alpha) * self._ewma_var + alpha * (ret * ret)
+            self._vol_scale = 1.0
+            return
+        
+        # Update EWMA variance using halflife
+        # alpha = 1 - exp(-ln(2) / halflife)
+        halflife = max(1, self.config.vol_halflife)
+        alpha = 1.0 - np.exp(-np.log(2) / halflife)
+        
+        self._ewma_var = (1.0 - alpha) * self._ewma_var + alpha * (ret * ret)
+        realized_vol = float(np.sqrt(self._ewma_var))
+        
+        # Compute vol scale: target_vol / realized_vol, clamped to [0.25, 1.0]
+        if realized_vol > 0:
+            raw_scale = self.config.target_vol / realized_vol
+            self._vol_scale = float(np.clip(raw_scale, 0.25, 1.0))
+        else:
+            self._vol_scale = 1.0
     
     def sync_positions(self, actual_pos: dict[str, float]) -> None:
         """Sync internal state with actual positions after execution."""
         for t in TICKERS:
             self._prev_pos[t] = actual_pos.get(t, 0.0)
+    
+    def update_pnl(self, current_pnl: float) -> None:
+        """Update PnL tracking for drawdown throttle."""
+        self._current_pnl = current_pnl
+        if current_pnl > self._peak_pnl:
+            self._peak_pnl = current_pnl
+        
+        # Check if drawdown throttle should be active
+        if self.config.dd_throttle_enabled:
+            drawdown = self._peak_pnl - self._current_pnl
+            self._dd_throttle_active = drawdown > self.config.dd_throttle_threshold
 
     def _flatten(self, current_pos: dict[str, float] | None) -> dict[str, float]:
         """Move toward zero, respecting turnover cap."""
@@ -224,14 +314,34 @@ class Allocator:
         prev: dict[str, float],
         target: dict[str, float],
     ) -> dict[str, float]:
-        """Limit position changes per tick."""
-        max_delta = {t: self.config.max_shares.get(t, 200_000) * self.config.turnover_pct for t in TICKERS}
+        """Limit position changes per tick.
+        
+        Supports:
+        - Asymmetric turnover: exits (moves toward 0) can be faster than entries
+        - Drawdown throttle: reduce entry turnover when in drawdown
+        """
+        base_pct = self.config.turnover_pct
+        exit_mult = self.config.exit_turnover_mult
+        
+        # Apply drawdown throttle to entry turnover (not exits - we still want fast exits)
+        entry_pct = base_pct
+        if self._dd_throttle_active:
+            entry_pct *= self.config.dd_throttle_factor
         
         result = {}
         for t in TICKERS:
             p = prev.get(t, 0.0)
             tgt = target.get(t, 0.0)
-            delta = np.clip(tgt - p, -max_delta[t], max_delta[t])
+            max_sh = self.config.max_shares.get(t, 200_000)
+            
+            # Determine if this is an exit (moving toward 0) or entry (moving away from 0)
+            is_exit = abs(tgt) < abs(p)
+            
+            # Use higher turnover for exits, throttled turnover for entries in DD
+            pct = base_pct * exit_mult if is_exit else entry_pct
+            max_delta = max_sh * pct
+            
+            delta = np.clip(tgt - p, -max_delta, max_delta)
             result[t] = p + delta
         
         return result
