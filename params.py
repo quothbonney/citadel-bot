@@ -76,6 +76,10 @@ class AllocatorConfig:
     min_threshold: float = 0.12  # Minimum |spread| to be considered
     top_n: int = 4  # Max signals to allocate to
     enabled: bool = True
+    # Risk management
+    stop_loss_mult: float = 2.0      # Exit if spread exceeds entry * this
+    take_profit_mult: float = 0.3    # Exit if spread drops to entry * this
+    max_hold_ticks: int = 300        # Force exit after this many ticks
 
 
 @dataclass
@@ -121,6 +125,9 @@ class StrategyParams:
                 min_threshold=a.get('min_threshold', 0.12),
                 top_n=a.get('top_n', 4),
                 enabled=a.get('enabled', True),
+                stop_loss_mult=a.get('stop_loss_mult', 2.0),
+                take_profit_mult=a.get('take_profit_mult', 0.3),
+                max_hold_ticks=a.get('max_hold_ticks', 300),
             )
 
         return cls(

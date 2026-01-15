@@ -11,8 +11,8 @@ from settings import settings
 from sizer import FixedSizer
 
 
-def run(params_path: str = None, scale: int = 1000) -> None:
-    init_logging()
+def run(params_path: str = None, scale: int = 1000, verbose: bool = False) -> None:
+    init_logging(console_level='DEBUG' if verbose else 'INFO')
 
     # Load strategy params
     path = params_path or DEFAULT_PARAMS_PATH
@@ -29,6 +29,7 @@ def run(params_path: str = None, scale: int = 1000) -> None:
     runner = StrategyRunner(client, params, market, sizer=sizer)
 
     # Main loop
+    tick_count = 0
     while True:
         case = client.get_case()
         if case.get('status') != 'ACTIVE':
@@ -36,7 +37,18 @@ def run(params_path: str = None, scale: int = 1000) -> None:
             break
 
         portfolio = client.get_portfolio()
-        runner.on_tick(portfolio, case)
+        signals = runner.on_tick(portfolio, case)
+
+        # Verbose: print signal info every 10 ticks
+        if verbose and tick_count % 10 == 0:
+            for sig in signals:
+                logging.info('SIGNAL: %s | %s | %s', sig.strategy_id, sig.action, sig.reason)
+            # Print current positions
+            pos_str = ', '.join(f'{t}:{portfolio.get(t, {}).get("position", 0)}'
+                               for t in ['ETF', 'AAA', 'BBB', 'CCC', 'DDD', 'IND'])
+            logging.info('POSITIONS: %s', pos_str)
+
+        tick_count += 1
         time.sleep(settings.poll_interval)
 
 
@@ -44,5 +56,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run trading bot')
     parser.add_argument('--params', '-p', default=str(DEFAULT_PARAMS_PATH), help='Strategy params file')
     parser.add_argument('--scale', '-s', type=int, default=1000, help='Position size multiplier (default: 1000)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     args = parser.parse_args()
-    run(args.params, args.scale)
+    run(args.params, args.scale, args.verbose)

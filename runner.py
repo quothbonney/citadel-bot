@@ -41,11 +41,14 @@ class StrategyRunner:
                 turnover_k=params.allocator.turnover_k,
                 min_threshold=params.allocator.min_threshold,
                 top_n=params.allocator.top_n,
+                stop_loss_mult=params.allocator.stop_loss_mult,
+                take_profit_mult=params.allocator.take_profit_mult,
+                max_hold_ticks=params.allocator.max_hold_ticks,
             )
             self.allocator = PortfolioAllocator(config, params.width)
-            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM min_thresh=%.2f top_n=%d',
-                         config.gross_limit / 1e6, config.net_limit / 1e6,
-                         config.min_threshold, config.top_n)
+            logging.info('Allocator enabled: gross=$%.0fM min_thresh=%.2f top_n=%d SL=%.1fx TP=%.1fx max_hold=%d',
+                         config.gross_limit / 1e6, config.min_threshold, config.top_n,
+                         config.stop_loss_mult, config.take_profit_mult, config.max_hold_ticks)
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -161,11 +164,21 @@ class StrategyRunner:
         # Get current positions
         current_pos = {t: portfolio.get(t, {}).get('position', 0) for t in self.market.all_tickers}
 
+        # Debug: log signal strengths
+        if specs:
+            above_thresh = [s for s in specs if s.abs_signal >= self.allocator.config.min_threshold]
+            logging.debug('Signals: %d total, %d above threshold (%.2f)',
+                         len(specs), len(above_thresh), self.allocator.config.min_threshold)
+            for s in sorted(specs, key=lambda x: x.strength, reverse=True)[:4]:
+                logging.debug('  %s: signal=%.4f sigma=%.4f strength=%.2f %s',
+                             s.name, s.signal, s.sigma, s.strength,
+                             '*' if s.abs_signal >= self.allocator.config.min_threshold else '')
+
         # Allocate (returns target positions and list of active strategy names)
         target_pos, active_names = self.allocator.allocate(specs, prices, current_pos)
 
-        # Convert to orders
-        orders = self.allocator.positions_to_orders(target_pos, current_pos, prices)
+        # Convert to orders (with debug logging)
+        orders = self.allocator.positions_to_orders(target_pos, current_pos, prices, debug=True)
 
         # Execute orders
         if orders:

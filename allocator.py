@@ -50,6 +50,11 @@ class AllocatorConfig:
     min_threshold: float = 0.12   # Minimum |spread| to be considered
     top_n: int = 4                # Max number of signals to allocate to
 
+    # Risk management
+    stop_loss_mult: float = 2.0      # Exit if |spread| exceeds entry * this (e.g., 2.0 = double)
+    take_profit_mult: float = 0.3    # Exit if |spread| drops to entry * this (e.g., 0.3 = 70% reversion)
+    max_hold_ticks: int = 300        # Force exit after this many ticks (~2.5 min at 0.5s poll)
+
 
 class PortfolioAllocator:
     """Weighted top-N portfolio allocation.
@@ -80,6 +85,11 @@ class PortfolioAllocator:
                 self.config.max_shares.get(leg, 300_000)
             )
 
+        # Position tracking for risk management
+        # {strategy_name: {'entry_spread': float, 'entry_tick': int, 'direction': int}}
+        self._positions: dict[str, dict] = {}
+        self._current_tick: int = 0
+
     def allocate(
         self,
         specs: list[StrategySpec],
@@ -96,53 +106,99 @@ class PortfolioAllocator:
         Returns:
             Tuple of (target positions dict, list of active strategy names)
         """
-        # 1. Filter by minimum threshold
-        eligible = [s for s in specs if s.abs_signal >= self.config.min_threshold]
+        self._current_tick += 1
+
+        # Build lookup for current signals
+        signal_lookup = {s.name: s for s in specs}
+
+        # 1. Apply risk management to existing positions
+        forced_exits = set()
+        for name, pos_info in list(self._positions.items()):
+            spec = signal_lookup.get(name)
+            if spec is None:
+                # Strategy no longer providing signal - exit
+                forced_exits.add(name)
+                continue
+
+            entry_spread = pos_info['entry_spread']
+            entry_tick = pos_info['entry_tick']
+            direction = pos_info['direction']
+            ticks_held = self._current_tick - entry_tick
+
+            # Current spread (same direction as entry)
+            current_spread = spec.abs_signal
+
+            # Check stop loss: spread moved against us (got bigger)
+            if current_spread > entry_spread * self.config.stop_loss_mult:
+                forced_exits.add(name)
+                continue
+
+            # Check take profit: spread reverted enough
+            if current_spread < entry_spread * self.config.take_profit_mult:
+                forced_exits.add(name)
+                continue
+
+            # Check time limit
+            if ticks_held >= self.config.max_hold_ticks:
+                forced_exits.add(name)
+                continue
+
+        # Remove forced exits from position tracking
+        for name in forced_exits:
+            if name in self._positions:
+                del self._positions[name]
+
+        # 2. Filter by minimum threshold (excluding forced exits)
+        eligible = [s for s in specs
+                    if s.abs_signal >= self.config.min_threshold
+                    and s.name not in forced_exits]
 
         if not eligible:
             # No signals above threshold - flatten positions
+            self._positions.clear()
             return self._flatten_positions(current_pos), []
 
-        # 2. Rank by strength and take top N
+        # 3. Rank by strength and take top N
         eligible.sort(key=lambda s: s.strength, reverse=True)
         top_specs = eligible[:self.config.top_n]
         active_names = [s.name for s in top_specs]
 
-        # 3. Compute weights proportional to strength
+        # 4. Track new entries
+        for spec in top_specs:
+            if spec.name not in self._positions:
+                self._positions[spec.name] = {
+                    'entry_spread': spec.abs_signal,
+                    'entry_tick': self._current_tick,
+                    'direction': spec.direction,
+                }
+
+        # 5. Compute weights proportional to strength
         strengths = [s.strength for s in top_specs]
         total_strength = sum(strengths)
         weights = [s / total_strength for s in strengths]
 
-        # 4. Allocate gross across top signals
+        # 6. Allocate gross across top signals
+        effective_gross = self.config.gross_limit
+
         pos = {leg: 0.0 for leg in self.LEGS}
-        agg_dir = 0.0
 
         for spec, weight in zip(top_specs, weights):
             d = spec.direction
-            agg_dir += weight * d
 
             unit_pos = spec.build_pos(prices)
             g_unit = self._gross(unit_pos, prices)
 
             if g_unit > 0:
-                # Allocate fraction of gross budget to this strategy
-                units = (weight * self.config.gross_limit / g_unit) * d
+                # Allocate fraction of effective gross budget to this strategy
+                units = (weight * effective_gross / g_unit) * d
                 for leg, shares in unit_pos.items():
                     if leg in pos:
                         pos[leg] += shares * units
 
-        # 5. Add IND to hit net target
-        net_target = np.sign(agg_dir) * self.config.net_limit if agg_dir != 0 else 0.0
-        net_now = self._net(pos, prices)
-        ind_price = prices.get('IND', 1.0)
-        if ind_price > 0:
-            ind_delta = (net_target - net_now) / ind_price
-            pos['IND'] += ind_delta
-
-        # 6. Project into constraints
+        # 7. Project into constraints
         pos = self._project_to_limits(pos, prices)
 
-        # 7. Apply turnover cap
+        # 8. Apply turnover cap
         prev = current_pos or self._prev_pos
         pos = self._apply_turnover_cap(prev, pos)
 
@@ -160,6 +216,7 @@ class PortfolioAllocator:
         target: dict[str, float],
         current: dict[str, float],
         prices: dict[str, float],
+        debug: bool = False,
     ) -> list['Order']:
         """Convert position deltas to orders.
 
@@ -167,10 +224,12 @@ class PortfolioAllocator:
             target: Target positions
             current: Current positions
             prices: Current prices for limit prices
+            debug: Print debug info
 
         Returns:
             List of Order objects
         """
+        import logging
         from strategies.base import Order
 
         orders = []
@@ -179,8 +238,14 @@ class PortfolioAllocator:
             cur = current.get(ticker, 0.0)
             delta = tgt - cur
 
-            # Skip small changes (dead band: 15% of current or 5000 shares minimum)
-            min_delta = max(5000, abs(cur) * 0.15)
+            # Skip small changes (dead band: 10% of current or 1000 shares minimum)
+            min_delta = max(1000, abs(cur) * 0.10)
+
+            if debug:
+                logging.debug('  %s: cur=%.0f tgt=%.0f delta=%.0f min_delta=%.0f %s',
+                             ticker, cur, tgt, delta, min_delta,
+                             'SKIP' if abs(delta) < min_delta else 'ORDER')
+
             if abs(delta) < min_delta:
                 continue
 
@@ -253,3 +318,5 @@ class PortfolioAllocator:
     def reset(self):
         """Reset allocator state (e.g., at start of new period)."""
         self._prev_pos = {leg: 0.0 for leg in self.LEGS}
+        self._positions.clear()
+        self._current_tick = 0

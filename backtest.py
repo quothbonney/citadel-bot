@@ -117,12 +117,8 @@ class BacktestRunner:
             print(f'  FILL: {side} {qty} {ticker} @ {price:.2f}')
             print(f'    pos before: qty={pos.quantity}, avg={pos.avg_price:.2f}, realized={pos.realized_pnl:.2f}')
 
-        # Half-spread cost
-        sec = portfolio.get(ticker, {})
-        bid = sec.get('bid', 0)
-        ask = sec.get('ask', 0)
-        spread = (ask - bid) if bid and ask else 0
-        cost = (spread / 2) * qty
+        # No additional cost - spread is already in fill price (buy at ask, sell at bid)
+        cost = 0.0
 
         # Update position
         if side == 'BUY':

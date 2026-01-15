@@ -11,18 +11,31 @@
       "ETF": 300000
     },
     "turnover_k": 50000,
-    "min_threshold": 0.05,
+    "min_threshold": 0.03,
     "top_n": 4,
-    "enabled": true
+    "enabled": true,
+    "stop_loss_mult": 2.5,
+    "take_profit_mult": 0,
+    "max_hold_ticks": 500
   },
   "strategies": [
     {
       "type": "etf_nav",
       "pyramid": {
-        "entry_levels": [0.12, 0.16, 0.20],
-        "entry_sizes": [1, 1, 1],
-        "exit_levels": [0.0],
-        "stop_loss": 0.50
+        "entry_levels": [
+          0.12,
+          0.16,
+          0.2
+        ],
+        "entry_sizes": [
+          1,
+          1,
+          1
+        ],
+        "exit_levels": [
+          0.0
+        ],
+        "stop_loss": 0.5
       },
       "eod_flat": true,
       "enabled": true
@@ -35,9 +48,19 @@
       "beta": 0.812561,
       "std": 0.008484,
       "pyramid": {
-        "entry_levels": [0.072206, 0.090257, 0.108309],
-        "entry_sizes": [1, 1, 1],
-        "exit_levels": [0.0],
+        "entry_levels": [
+          0.12,
+          0.2,
+          0.4
+        ],
+        "entry_sizes": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "exit_levels": [
+          0.0
+        ],
         "stop_loss": 0.198566
       },
       "enabled": true
@@ -50,9 +73,19 @@
       "beta": 0.793935,
       "std": 0.017664,
       "pyramid": {
-        "entry_levels": [0.061404, 0.076755, 0.092106],
-        "entry_sizes": [1, 1, 1],
-        "exit_levels": [0.0],
+        "entry_levels": [
+          0.12,
+          0.2,
+          0.4
+        ],
+        "entry_sizes": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "exit_levels": [
+          0.0
+        ],
         "stop_loss": 0.168861
       },
       "enabled": true
@@ -65,9 +98,19 @@
       "beta": 0.945996,
       "std": 0.038275,
       "pyramid": {
-        "entry_levels": [0.157439, 0.196799, 0.236158],
-        "entry_sizes": [1, 1, 1],
-        "exit_levels": [0.0],
+        "entry_levels": [
+          0.12,
+          0.2,
+          0.4
+        ],
+        "entry_sizes": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "exit_levels": [
+          0.0
+        ],
         "stop_loss": 0.432957
       },
       "enabled": true
@@ -80,9 +123,19 @@
       "beta": 0.816632,
       "std": 0.030313,
       "pyramid": {
-        "entry_levels": [0.115767, 0.162074, 0.20838],
-        "entry_sizes": [1, 1, 1],
-        "exit_levels": [0.0],
+        "entry_levels": [
+          0.12,
+          0.2,
+          0.4
+        ],
+        "entry_sizes": [
+          1
+        ],
+        "exit_levels": [
+          0.5,
+          0.5,
+          0.5
+        ],
         "stop_loss": 0.439914
       },
       "enabled": true
@@ -95,9 +148,19 @@
       "beta": 0.961851,
       "std": 0.010074,
       "pyramid": {
-        "entry_levels": [0.12],
-        "entry_sizes": [1],
-        "exit_levels": [0.0],
+        "entry_levels": [
+          0.12,
+          0.2,
+          0.4
+        ],
+        "entry_sizes": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "exit_levels": [
+          0.0
+        ],
         "stop_loss": null
       },
       "enabled": true
