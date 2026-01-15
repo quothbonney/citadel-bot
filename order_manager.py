@@ -143,7 +143,8 @@ class OrderManager:
             # Handle known RIT error: risk limit rejection. Do not crash the whole bot for this.
             if isinstance(resp, dict):
                 msg = str(resp.get("message") or "")
-                if "exceed gross trading limits" in msg.lower():
+                msg_l = msg.lower()
+                if ("exceed gross trading limits" in msg_l) or ("exceed net trading limits" in msg_l):
                     raise OrderRejectedByRiskLimit(
                         ticker=ticker,
                         side=side.value,
