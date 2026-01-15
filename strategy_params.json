@@ -16,7 +16,7 @@
     "horizon_bars": 10,
     "switch_lambda": 0.15,
     "regime_cutoff": 1.5,
-    "w_max": 1.0,
+    "w_max": 0.50,
     "enabled": true
   },
   "strategies": [
