@@ -14,9 +14,9 @@
     "min_threshold": 0.03,
     "top_n": 4,
     "enabled": true,
-    "stop_loss_z": 0.4,
-    "take_profit_z": 0.01,
-    "max_hold_ticks": 500
+    "stop_loss_z": 999,
+    "take_profit_z": 0,
+    "max_hold_ticks": 999999
   },
   "strategies": [
     {
