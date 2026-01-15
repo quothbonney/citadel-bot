@@ -4,11 +4,13 @@ Hyperparameter search for allocator params.
 
 Usage:
     python hypersearch.py [session_dir]
+    python hypersearch.py --samples 500  # random search with 500 samples
 """
 
 import argparse
 import itertools
 import json
+import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +83,7 @@ def main():
     parser.add_argument("session", nargs="?", help="Session directory")
     parser.add_argument("--scale", "-s", type=int, default=1000)
     parser.add_argument("--top", "-t", type=int, default=10, help="Show top N results")
+    parser.add_argument("--samples", "-n", type=int, default=0, help="Random sample size (0=full grid)")
     args = parser.parse_args()
 
     # Find session
@@ -108,17 +111,27 @@ def main():
 
     # Define search grid
     grid = {
-        "turnover_pct": [0.001, 0.005, 0.01, 0.02, 0.05],
-        "switch_lambda": [0.0, 0.05, 0.10, 0.15, 0.20],
-        "horizon_bars": [5, 10, 20, 50],
-        "regime_cutoff": [1.5, 2.0, 2.5, 3.0, 999.0],
+        "turnover_pct": [0.005, 0.01, 0.02, 0.05, 0.10],
+        "switch_lambda": [0.0, 0.05, 0.10, 0.15, 0.20, 0.25],
+        "horizon_bars": [3, 5, 10, 20],
+        "regime_cutoff": [1.0, 1.5, 2.0, 2.5, 999.0],
+        "w_max": [0.25, 0.35, 0.50, 0.65, 0.80, 1.0],
+        "top_n": [2, 3, 4, 5, 6],
+        "min_threshold": [0.0, 0.5, 1.0, 2.0],
     }
 
     # Generate all combinations
     keys = list(grid.keys())
     values = [grid[k] for k in keys]
     combos = list(itertools.product(*values))
-    print(f"Total combinations: {len(combos)}")
+    
+    # Random sample if requested
+    if args.samples > 0 and args.samples < len(combos):
+        random.seed(42)
+        combos = random.sample(combos, args.samples)
+        print(f"Random sample: {len(combos)} / {len(list(itertools.product(*values)))} combinations")
+    else:
+        print(f"Full grid: {len(combos)} combinations")
 
     results: list[Result] = []
     for i, combo in enumerate(combos):

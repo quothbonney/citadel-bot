@@ -10,12 +10,12 @@
       "DDD": 200000,
       "ETF": 300000
     },
-    "turnover_pct": 0.01,
+    "turnover_pct": 0.005,
     "min_threshold": 0.0,
     "top_n": 4,
-    "horizon_bars": 10,
-    "switch_lambda": 0.15,
-    "regime_cutoff": 1.5,
+    "horizon_bars": 20,
+    "switch_lambda": 0.25,
+    "regime_cutoff": 2.5,
     "w_max": 0.50,
     "enabled": true
   },
