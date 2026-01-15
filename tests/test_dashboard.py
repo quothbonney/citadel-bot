@@ -109,3 +109,12 @@ def test_strategies_endpoint_reports_spread(client):
     assert "action" in first
     assert "expected_pnl" in first
 
+
+def test_root_lists_endpoints(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert "/health" in payload["endpoints"]
+    assert "/positions" in payload["endpoints"]
+    assert "/strategies" in payload["endpoints"]
+

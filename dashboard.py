@@ -181,6 +181,13 @@ def create_app(
             "strategies": [view.__dict__ for view in views],
         })
 
+    @app.route("/")
+    def index():
+        return jsonify({
+            "status": "ok",
+            "endpoints": ["/health", "/positions", "/strategies"],
+        })
+
     return app
 
 
