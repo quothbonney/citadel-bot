@@ -70,7 +70,7 @@ class FakeClient:
 
 def test_order_manager_wont_flip_sides_same_tick_when_cancel_is_unreliable():
     c = FakeClient()
-    om = OrderManager(c)  # type: ignore[arg-type]
+    om = OrderManager(c, cancel_cooldown_s=0.25, unknown_order_ttl_s=10.0)  # type: ignore[arg-type]
 
     # Place a BUY
     desired = {"AAA": (OrderAction.BUY, 100, 10.0)}
@@ -95,5 +95,17 @@ def test_order_manager_wont_flip_sides_same_tick_when_cancel_is_unreliable():
     open_orders2 = c.get_orders(OrderStatus.OPEN)
     assert len(open_orders2) == 1
     assert open_orders2[0]["action"] == OrderAction.SELL.value
+
+
+def test_order_manager_cancel_cooldown_blocks_immediate_resubmit_after_cancel():
+    c = FakeClient()
+    om = OrderManager(c, cancel_cooldown_s=10.0, unknown_order_ttl_s=10.0)  # long cooldown
+
+    # Place BUY then request SELL to trigger cancel_sent timestamp
+    om.reconcile_target_orders({"AAA": (OrderAction.BUY, 100, 10.0)})
+    om.reconcile_target_orders({"AAA": (OrderAction.SELL, 100, 9.9)})
+
+    # Order is still OPEN, and cooldown should prevent any new order submission.
+    assert len(c.get_orders(OrderStatus.OPEN)) == 1
 
 

@@ -24,6 +24,8 @@
     "dd_throttle_enabled": false,
     "dd_throttle_threshold": 100000,
     "dd_throttle_factor": 0.5,
+    "cancel_cooldown_s": 0.25,
+    "unknown_order_ttl_s": 2.0,
     "enabled": true
   },
   "strategies": [

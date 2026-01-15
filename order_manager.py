@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import time
 
 from RotmanInteractiveTraderApi import OrderAction, OrderStatus, OrderType, RotmanInteractiveTraderApi
 
@@ -20,6 +21,8 @@ class TrackedOrder:
     side: OrderAction
     quantity: int
     price: float | None
+    t_created: float
+    t_cancel_sent: float | None = None
     state: LocalState = LocalState.SENT
     quantity_filled: float = 0.0
     status: OrderStatus | None = None
@@ -42,15 +45,24 @@ class OrderManager:
     This avoids 'cancel didn't actually cancel' simulator gotchas turning into double fills.
     """
 
-    def __init__(self, client: RotmanInteractiveTraderApi) -> None:
+    def __init__(
+        self,
+        client: RotmanInteractiveTraderApi,
+        *,
+        cancel_cooldown_s: float = 0.25,
+        unknown_order_ttl_s: float = 2.0,
+    ) -> None:
         self.client = client
         self._orders: dict[int, TrackedOrder] = {}
+        self.cancel_cooldown_s = float(cancel_cooldown_s)
+        self.unknown_order_ttl_s = float(unknown_order_ttl_s)
 
     def refresh(self) -> None:
         """Reconcile local tracked orders with server state."""
         open_orders = {o["order_id"]: o for o in self.client.get_orders(OrderStatus.OPEN)}
         cancelled = {o["order_id"]: o for o in self.client.get_orders(OrderStatus.CANCELLED)}
         transacted = {o["order_id"]: o for o in self.client.get_orders(OrderStatus.TRANSACTED)}
+        now = time.time()
 
         for oid, tr in list(self._orders.items()):
             if oid in open_orders:
@@ -75,6 +87,9 @@ class OrderManager:
                 continue
 
             # Unknown to server queries. Keep state as-is; do not assume cancellation worked.
+            # But do not keep zombies forever.
+            if (now - tr.t_created) > self.unknown_order_ttl_s:
+                del self._orders[oid]
 
         # Drop DONE orders to keep memory bounded
         for oid in [oid for oid, tr in self._orders.items() if tr.state == LocalState.DONE]:
@@ -96,10 +111,12 @@ class OrderManager:
         if not ids:
             return
         self.client.cancel_orders(ids)
+        now = time.time()
         for oid in ids:
             tr = self._orders.get(oid)
             if tr is not None and tr.state != LocalState.DONE:
                 tr.state = LocalState.CANCEL_SENT
+                tr.t_cancel_sent = now
 
     def submit(self, ticker: str, side: OrderAction, quantity: int, price: float | None) -> int:
         resp = self.client.place_order(
@@ -116,6 +133,7 @@ class OrderManager:
             side=side,
             quantity=int(quantity),
             price=float(price) if price is not None else None,
+            t_created=time.time(),
             state=LocalState.SENT,
             quantity_filled=float(resp.get("quantity_filled", 0.0)),
             status=OrderStatus(resp.get("status", OrderStatus.OPEN.value)),
@@ -140,6 +158,18 @@ class OrderManager:
                 # If side differs, cancel and wait; do NOT place opposite in same tick.
                 if any(o.side != side for o in existing):
                     self.cancel_ticker(ticker)
+                continue
+
+            # Cooldown after cancel: if we recently cancelled anything for this ticker,
+            # do not place the opposite-side order immediately. This matches the probe's
+            # "open_delay=NA but TRANSACTED after cancel" behavior.
+            now = time.time()
+            recently_cancelled = any(
+                (o.t_cancel_sent is not None and (now - o.t_cancel_sent) < self.cancel_cooldown_s)
+                for o in self._orders.values()
+                if o.ticker == ticker
+            )
+            if recently_cancelled:
                 continue
 
             if qty <= 0:

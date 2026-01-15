@@ -30,7 +30,14 @@ class StrategyRunner:
         self.dry_run = dry_run
         self.order_manager: OrderManager | None = None
         if self.client is not None and not self.dry_run:
-            self.order_manager = OrderManager(self.client)
+            # Parameters are kept in strategy_params.json under allocator.*
+            if self.params.allocator is None:
+                raise ValueError("allocator enabled but params.allocator is None")
+            self.order_manager = OrderManager(
+                self.client,
+                cancel_cooldown_s=self.params.allocator.cancel_cooldown_s,
+                unknown_order_ttl_s=self.params.allocator.unknown_order_ttl_s,
+            )
 
         self.strategies: list[SignalStrategy] = []
         self._build_strategies()
