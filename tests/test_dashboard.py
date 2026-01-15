@@ -107,6 +107,7 @@ def test_strategies_endpoint_reports_spread(client):
     assert "strategy_id" in first
     assert first["spread"] is not None
     assert "action" in first
+    assert "strength" in first
     assert "expected_pnl" in first
 
 
@@ -118,4 +119,6 @@ def test_root_serves_html_dashboard(client):
     assert "Trading Dashboard" in body
     assert "/positions" in body
     assert "/strategies" in body
+    assert "Strength" in body
+    assert "canvas" in body
 

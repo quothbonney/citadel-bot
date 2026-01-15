@@ -40,6 +40,7 @@ class StrategyView:
     state: str
     action: str
     spread: float | None
+    strength: float | None
     expected_pnl: float | None
     reason: str
     orders: list[dict[str, Any]]
@@ -67,18 +68,35 @@ class StrategyInspector:
             spread = getattr(strat, "_spread_adj", None)
             orders = [self._order_dict(o, portfolio) for o in signal.orders]
             expected = self._expected_pnl(signal.orders, portfolio)
+            strength = self._compute_strength(strat, spread)
 
             views.append(StrategyView(
                 strategy_id=strat.strategy_id,
                 state=strat.state.value,
                 action=signal.action,
                 spread=spread,
+                strength=strength,
                 expected_pnl=expected,
                 reason=signal.reason,
                 orders=orders,
             ))
 
         return views
+
+    def _compute_strength(self, strat, spread: float | None) -> float | None:
+        """Compute signal strength: |spread| / sigma."""
+        if spread is None:
+            return None
+        
+        from strategies.pair_coint import PairCointStrategy
+        from strategies.etf_nav import EtfNavStrategy
+        
+        if isinstance(strat, PairCointStrategy):
+            return abs(spread) / strat.params.std if strat.params.std > 0 else None
+        elif isinstance(strat, EtfNavStrategy):
+            threshold = strat.params.pyramid.first_entry
+            return abs(spread) / threshold if threshold > 0 else None
+        return None
 
     def _order_dict(self, order: Order, portfolio: dict) -> dict[str, Any]:
         sec = portfolio.get(order.ticker, {})
@@ -201,6 +219,7 @@ def create_app(
     .warn { color: #f5d67d; }
     .err { color: #f57d7d; }
     code { color: #9cf; }
+    #chart { border: 1px solid #444; margin: 20px 0; background: #0f0f0f; }
   </style>
 </head>
 <body>
@@ -210,10 +229,16 @@ def create_app(
   <h2>Positions</h2>
   <div id="positions"></div>
 
+  <h2>Exposure & PnL History</h2>
+  <canvas id="chart" width="1200" height="300"></canvas>
+
   <h2>Strategies</h2>
   <div id="strategies"></div>
 
   <script>
+    const history = { t: [], gross: [], net: [], pnl: [] };
+    const MAX_POINTS = 100;
+
     async function fetchJson(path) {
       const r = await fetch(path);
       if (!r.ok) throw new Error(path + " -> " + r.status);
@@ -247,23 +272,96 @@ def create_app(
     }
 
     function renderStrategies(data) {
-      const rows = data.strategies.map(s => `
+      const rows = data.strategies.map(s => {
+        const strengthClass = s.strength !== null && s.strength > 1.0 ? 'warn' : '';
+        return `
         <tr>
           <td>${s.strategy_id}</td>
           <td>${s.state}</td>
           <td>${s.action}</td>
           <td>${s.spread === null ? "" : s.spread.toFixed ? s.spread.toFixed(4) : s.spread}</td>
+          <td class="${strengthClass}">${s.strength === null ? "" : s.strength.toFixed ? s.strength.toFixed(2) : s.strength}</td>
           <td>${s.expected_pnl === null ? "" : s.expected_pnl.toFixed ? s.expected_pnl.toFixed(2) : s.expected_pnl}</td>
           <td>${s.reason}</td>
         </tr>
-      `).join("");
+        `;
+      }).join("");
       return `
         <div>Case: ${JSON.stringify(data.case)}</div>
         <table>
-          <thead><tr><th>ID</th><th>State</th><th>Action</th><th>Spread</th><th>ExpPnL</th><th>Reason</th></tr></thead>
+          <thead><tr><th>ID</th><th>State</th><th>Action</th><th>Spread</th><th>Strength</th><th>ExpPnL</th><th>Reason</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       `;
+    }
+
+    function drawChart() {
+      const canvas = document.getElementById("chart");
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+      const pad = 40;
+
+      ctx.fillStyle = "#0f0f0f";
+      ctx.fillRect(0, 0, w, h);
+
+      if (history.t.length === 0) return;
+
+      // Find data ranges
+      const allVals = [...history.gross, ...history.net, ...history.pnl];
+      const minVal = Math.min(...allVals);
+      const maxVal = Math.max(...allVals);
+      const range = maxVal - minVal || 1;
+
+      // Scale functions
+      const xScale = (i) => pad + (i / (MAX_POINTS - 1)) * (w - 2 * pad);
+      const yScale = (v) => h - pad - ((v - minVal) / range) * (h - 2 * pad);
+
+      // Draw axes
+      ctx.strokeStyle = "#444";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad, pad);
+      ctx.lineTo(pad, h - pad);
+      ctx.lineTo(w - pad, h - pad);
+      ctx.stroke();
+
+      // Draw grid
+      ctx.strokeStyle = "#222";
+      for (let i = 1; i < 5; i++) {
+        const y = pad + (i / 5) * (h - 2 * pad);
+        ctx.beginPath();
+        ctx.moveTo(pad, y);
+        ctx.lineTo(w - pad, y);
+        ctx.stroke();
+      }
+
+      // Draw lines
+      function plotLine(data, color) {
+        if (data.length < 2) return;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < data.length; i++) {
+          const x = xScale(i);
+          const y = yScale(data[i]);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      plotLine(history.gross, "#7d9cf5"); // blue
+      plotLine(history.net, "#f5d67d");   // yellow
+      plotLine(history.pnl, "#7df57d");   // green
+
+      // Legend
+      ctx.font = "12px monospace";
+      ctx.fillStyle = "#7d9cf5";
+      ctx.fillText("Gross", w - 150, 20);
+      ctx.fillStyle = "#f5d67d";
+      ctx.fillText("Net", w - 90, 20);
+      ctx.fillStyle = "#7df57d";
+      ctx.fillText("PnL", w - 40, 20);
     }
 
     async function refresh() {
@@ -272,6 +370,22 @@ def create_app(
         document.getElementById("status").textContent = "OK";
         document.getElementById("positions").innerHTML = renderPositions(pos);
         document.getElementById("strategies").innerHTML = renderStrategies(strat);
+
+        // Record history
+        history.t.push(Date.now());
+        history.gross.push(pos.gross_exposure);
+        history.net.push(pos.net_exposure);
+        history.pnl.push(pos.total_pnl);
+
+        // Keep only last MAX_POINTS
+        if (history.t.length > MAX_POINTS) {
+          history.t.shift();
+          history.gross.shift();
+          history.net.shift();
+          history.pnl.shift();
+        }
+
+        drawChart();
       } catch (e) {
         document.getElementById("status").innerHTML = '<span class="err">' + e + '</span>';
       }
