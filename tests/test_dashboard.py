@@ -121,4 +121,6 @@ def test_root_serves_html_dashboard(client):
     assert "/strategies" in body
     assert "Strength" in body
     assert "canvas" in body
+    assert "Sharpe" in body
+    assert "computeSharpe" in body
 

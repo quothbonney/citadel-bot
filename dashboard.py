@@ -236,7 +236,7 @@ def create_app(
   <div id="strategies"></div>
 
   <script>
-    const history = { t: [], gross: [], net: [], pnl: [] };
+    const history = { t: [], gross: [], net: [], pnl: [], returns: [] };
     const MAX_POINTS = 100;
 
     async function fetchJson(path) {
@@ -245,10 +245,25 @@ def create_app(
       return await r.json();
     }
 
+    function computeSharpe() {
+      if (history.returns.length < 2) return null;
+      const mean = history.returns.reduce((a, b) => a + b, 0) / history.returns.length;
+      const variance = history.returns.reduce((a, b) => a + (b - mean) ** 2, 0) / history.returns.length;
+      const std = Math.sqrt(variance);
+      if (std === 0) return null;
+      // Annualize: assume 2s intervals, 252 trading days, 6.5 hours = 11700 2s intervals per year
+      const periodsPerYear = Math.sqrt(11700);
+      return (mean / std) * periodsPerYear;
+    }
+
     function renderPositions(data) {
       const gross = data.gross_exposure.toFixed(2);
       const net = data.net_exposure.toFixed(2);
       const pnl = data.total_pnl.toFixed(2);
+      const sharpe = computeSharpe();
+      const sharpeStr = sharpe === null ? "N/A" : sharpe.toFixed(2);
+      const sharpeClass = sharpe === null ? "" : sharpe > 2 ? "ok" : sharpe > 0 ? "warn" : "err";
+      
       const rows = data.positions.map(p => `
         <tr>
           <td>${p.ticker}</td>
@@ -263,7 +278,8 @@ def create_app(
       return `
         <div>Gross: <span class="${Math.abs(net) <= Math.abs(gross) ? 'ok' : 'warn'}">${gross}</span>
              | Net: <span class="${Math.abs(net) < Math.abs(gross) ? 'ok' : 'warn'}">${net}</span>
-             | PnL: <span class="${pnl >= 0 ? 'ok' : 'err'}">${pnl}</span></div>
+             | PnL: <span class="${pnl >= 0 ? 'ok' : 'err'}">${pnl}</span>
+             | Sharpe: <span class="${sharpeClass}">${sharpeStr}</span></div>
         <table>
           <thead><tr><th>Ticker</th><th>Pos</th><th>Bid</th><th>Ask</th><th>Mid</th><th>Unreal</th><th>Real</th></tr></thead>
           <tbody>${rows}</tbody>
@@ -306,7 +322,25 @@ def create_app(
 
       if (history.t.length === 0) return;
 
-      // Find data ranges
+      // Compute rolling Sharpe (using last 30 points for each point)
+      const rollingSharpe = [];
+      const sharpeWindow = 30;
+      for (let i = 0; i < history.returns.length; i++) {
+        const start = Math.max(0, i - sharpeWindow + 1);
+        const window = history.returns.slice(start, i + 1);
+        if (window.length < 2) {
+          rollingSharpe.push(0);
+          continue;
+        }
+        const mean = window.reduce((a, b) => a + b, 0) / window.length;
+        const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length;
+        const std = Math.sqrt(variance);
+        const periodsPerYear = Math.sqrt(11700);
+        const sharpe = std > 0 ? (mean / std) * periodsPerYear : 0;
+        rollingSharpe.push(sharpe);
+      }
+
+      // Find data ranges (normalize Sharpe to fit on same chart)
       const allVals = [...history.gross, ...history.net, ...history.pnl];
       const minVal = Math.min(...allVals);
       const maxVal = Math.max(...allVals);
@@ -315,6 +349,13 @@ def create_app(
       // Scale functions
       const xScale = (i) => pad + (i / (MAX_POINTS - 1)) * (w - 2 * pad);
       const yScale = (v) => h - pad - ((v - minVal) / range) * (h - 2 * pad);
+      
+      // Sharpe on secondary axis (right side, scaled to [-5, 5] range)
+      const sharpeScale = (s) => {
+        const sharpeRange = 10; // -5 to +5
+        const sharpeMin = -5;
+        return h - pad - ((s - sharpeMin) / sharpeRange) * (h - 2 * pad);
+      };
 
       // Draw axes
       ctx.strokeStyle = "#444";
@@ -323,6 +364,7 @@ def create_app(
       ctx.moveTo(pad, pad);
       ctx.lineTo(pad, h - pad);
       ctx.lineTo(w - pad, h - pad);
+      ctx.lineTo(w - pad, pad);
       ctx.stroke();
 
       // Draw grid
@@ -335,15 +377,25 @@ def create_app(
         ctx.stroke();
       }
 
+      // Draw zero line for Sharpe
+      ctx.strokeStyle = "#333";
+      ctx.setLineDash([5, 5]);
+      const zeroY = sharpeScale(0);
+      ctx.beginPath();
+      ctx.moveTo(pad, zeroY);
+      ctx.lineTo(w - pad, zeroY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
       // Draw lines
-      function plotLine(data, color) {
+      function plotLine(data, color, useScale = yScale) {
         if (data.length < 2) return;
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.beginPath();
         for (let i = 0; i < data.length; i++) {
           const x = xScale(i);
-          const y = yScale(data[i]);
+          const y = useScale(data[i]);
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         }
@@ -353,15 +405,31 @@ def create_app(
       plotLine(history.gross, "#7d9cf5"); // blue
       plotLine(history.net, "#f5d67d");   // yellow
       plotLine(history.pnl, "#7df57d");   // green
+      
+      // Plot Sharpe on secondary axis (offset by 1 since returns start at index 1)
+      if (rollingSharpe.length > 0) {
+        ctx.strokeStyle = "#f57d7d"; // red
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < rollingSharpe.length; i++) {
+          const x = xScale(i + 1); // +1 because returns[0] corresponds to history index 1
+          const y = sharpeScale(rollingSharpe[i]);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
 
       // Legend
       ctx.font = "12px monospace";
       ctx.fillStyle = "#7d9cf5";
-      ctx.fillText("Gross", w - 150, 20);
+      ctx.fillText("Gross", w - 200, 20);
       ctx.fillStyle = "#f5d67d";
-      ctx.fillText("Net", w - 90, 20);
+      ctx.fillText("Net", w - 140, 20);
       ctx.fillStyle = "#7df57d";
-      ctx.fillText("PnL", w - 40, 20);
+      ctx.fillText("PnL", w - 90, 20);
+      ctx.fillStyle = "#f57d7d";
+      ctx.fillText("Sharpe", w - 50, 20);
     }
 
     async function refresh() {
@@ -371,11 +439,18 @@ def create_app(
         document.getElementById("positions").innerHTML = renderPositions(pos);
         document.getElementById("strategies").innerHTML = renderStrategies(strat);
 
+        // Compute return (change in PnL)
+        const prevPnl = history.pnl.length > 0 ? history.pnl[history.pnl.length - 1] : pos.total_pnl;
+        const returnVal = pos.total_pnl - prevPnl;
+
         // Record history
         history.t.push(Date.now());
         history.gross.push(pos.gross_exposure);
         history.net.push(pos.net_exposure);
         history.pnl.push(pos.total_pnl);
+        if (history.pnl.length > 1) {
+          history.returns.push(returnVal);
+        }
 
         // Keep only last MAX_POINTS
         if (history.t.length > MAX_POINTS) {
@@ -383,6 +458,9 @@ def create_app(
           history.gross.shift();
           history.net.shift();
           history.pnl.shift();
+          if (history.returns.length > MAX_POINTS - 1) {
+            history.returns.shift();
+          }
         }
 
         drawChart();
