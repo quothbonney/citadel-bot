@@ -13,6 +13,8 @@
     "turnover_k": 50000,
     "min_threshold": 0.05,
     "top_n": 4,
+    "min_strength": 1.0,
+    "max_strength": 4.0,
     "enabled": true
   },
   "strategies": [

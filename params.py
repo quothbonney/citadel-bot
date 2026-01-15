@@ -73,8 +73,11 @@ class AllocatorConfig:
     net_limit: float = 10_000_000.0
     max_shares: dict[str, int] | None = None
     turnover_k: float = 50_000.0
-    min_threshold: float = 0.12  # Minimum |spread| to be considered
+    min_threshold: float = 0.12  # Minimum |spread| to be considered (legacy)
     top_n: int = 4  # Max signals to allocate to
+    # Confidence-based sizing
+    min_strength: float = 2.0   # Below this = 0% confidence
+    max_strength: float = 6.0   # At or above = 100% confidence
     enabled: bool = True
 
 
@@ -120,6 +123,8 @@ class StrategyParams:
                 turnover_k=a.get('turnover_k', 50_000.0),
                 min_threshold=a.get('min_threshold', 0.12),
                 top_n=a.get('top_n', 4),
+                min_strength=a.get('min_strength', 2.0),
+                max_strength=a.get('max_strength', 6.0),
                 enabled=a.get('enabled', True),
             )
 
