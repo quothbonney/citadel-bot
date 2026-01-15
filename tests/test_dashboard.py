@@ -120,7 +120,6 @@ def test_root_serves_html_dashboard(client):
     assert "/positions" in body
     assert "/strategies" in body
     assert "Strength" in body
-    assert "canvas" in body
     assert "Sharpe" in body
     assert "computeSharpe" in body
 

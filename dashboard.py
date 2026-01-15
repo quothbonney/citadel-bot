@@ -219,7 +219,6 @@ def create_app(
     .warn { color: #f5d67d; }
     .err { color: #f57d7d; }
     code { color: #9cf; }
-    #chart { border: 1px solid #444; margin: 20px 0; background: #0f0f0f; }
   </style>
 </head>
 <body>
@@ -228,9 +227,6 @@ def create_app(
 
   <h2>Positions</h2>
   <div id="positions"></div>
-
-  <h2>Exposure & PnL History</h2>
-  <canvas id="chart" width="1200" height="300"></canvas>
 
   <h2>Strategies</h2>
   <div id="strategies"></div>
@@ -311,127 +307,6 @@ def create_app(
       `;
     }
 
-    function drawChart() {
-      const canvas = document.getElementById("chart");
-      const ctx = canvas.getContext("2d");
-      const w = canvas.width, h = canvas.height;
-      const pad = 40;
-
-      ctx.fillStyle = "#0f0f0f";
-      ctx.fillRect(0, 0, w, h);
-
-      if (history.t.length === 0) return;
-
-      // Compute rolling Sharpe (using last 30 points for each point)
-      const rollingSharpe = [];
-      const sharpeWindow = 30;
-      for (let i = 0; i < history.returns.length; i++) {
-        const start = Math.max(0, i - sharpeWindow + 1);
-        const window = history.returns.slice(start, i + 1);
-        if (window.length < 2) {
-          rollingSharpe.push(0);
-          continue;
-        }
-        const mean = window.reduce((a, b) => a + b, 0) / window.length;
-        const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length;
-        const std = Math.sqrt(variance);
-        const periodsPerYear = Math.sqrt(11700);
-        const sharpe = std > 0 ? (mean / std) * periodsPerYear : 0;
-        rollingSharpe.push(sharpe);
-      }
-
-      // Find data ranges (normalize Sharpe to fit on same chart)
-      const allVals = [...history.gross, ...history.net, ...history.pnl];
-      const minVal = Math.min(...allVals);
-      const maxVal = Math.max(...allVals);
-      const range = maxVal - minVal || 1;
-
-      // Scale functions
-      const xScale = (i) => pad + (i / (MAX_POINTS - 1)) * (w - 2 * pad);
-      const yScale = (v) => h - pad - ((v - minVal) / range) * (h - 2 * pad);
-      
-      // Sharpe on secondary axis (right side, scaled to [-5, 5] range)
-      const sharpeScale = (s) => {
-        const sharpeRange = 10; // -5 to +5
-        const sharpeMin = -5;
-        return h - pad - ((s - sharpeMin) / sharpeRange) * (h - 2 * pad);
-      };
-
-      // Draw axes
-      ctx.strokeStyle = "#444";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(pad, pad);
-      ctx.lineTo(pad, h - pad);
-      ctx.lineTo(w - pad, h - pad);
-      ctx.lineTo(w - pad, pad);
-      ctx.stroke();
-
-      // Draw grid
-      ctx.strokeStyle = "#222";
-      for (let i = 1; i < 5; i++) {
-        const y = pad + (i / 5) * (h - 2 * pad);
-        ctx.beginPath();
-        ctx.moveTo(pad, y);
-        ctx.lineTo(w - pad, y);
-        ctx.stroke();
-      }
-
-      // Draw zero line for Sharpe
-      ctx.strokeStyle = "#333";
-      ctx.setLineDash([5, 5]);
-      const zeroY = sharpeScale(0);
-      ctx.beginPath();
-      ctx.moveTo(pad, zeroY);
-      ctx.lineTo(w - pad, zeroY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Draw lines
-      function plotLine(data, color, useScale = yScale) {
-        if (data.length < 2) return;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        for (let i = 0; i < data.length; i++) {
-          const x = xScale(i);
-          const y = useScale(data[i]);
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      }
-
-      plotLine(history.gross, "#7d9cf5"); // blue
-      plotLine(history.net, "#f5d67d");   // yellow
-      plotLine(history.pnl, "#7df57d");   // green
-      
-      // Plot Sharpe on secondary axis (offset by 1 since returns start at index 1)
-      if (rollingSharpe.length > 0) {
-        ctx.strokeStyle = "#f57d7d"; // red
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        for (let i = 0; i < rollingSharpe.length; i++) {
-          const x = xScale(i + 1); // +1 because returns[0] corresponds to history index 1
-          const y = sharpeScale(rollingSharpe[i]);
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      }
-
-      // Legend
-      ctx.font = "12px monospace";
-      ctx.fillStyle = "#7d9cf5";
-      ctx.fillText("Gross", w - 200, 20);
-      ctx.fillStyle = "#f5d67d";
-      ctx.fillText("Net", w - 140, 20);
-      ctx.fillStyle = "#7df57d";
-      ctx.fillText("PnL", w - 90, 20);
-      ctx.fillStyle = "#f57d7d";
-      ctx.fillText("Sharpe", w - 50, 20);
-    }
-
     async function refresh() {
       try {
         const [pos, strat] = await Promise.all([fetchJson("/positions"), fetchJson("/strategies")]);
@@ -462,8 +337,6 @@ def create_app(
             history.returns.shift();
           }
         }
-
-        drawChart();
       } catch (e) {
         document.getElementById("status").innerHTML = '<span class="err">' + e + '</span>';
       }
