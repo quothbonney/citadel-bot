@@ -156,7 +156,7 @@ class StrategyInspector:
                 ))
 
         target_pos, active = self.allocator.allocate(sigs, prices, current_pos)
-        orders = self.allocator.to_orders(target_pos, current_pos, prices)
+        orders = self.allocator.to_orders(target_pos, current_pos, prices, min_delta=1)
         diag = self.allocator.diagnostics()
 
         return {

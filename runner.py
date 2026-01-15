@@ -168,7 +168,8 @@ class StrategyRunner:
         target_pos, active_names = self.allocator.allocate(signals, prices, current_pos)
 
         # Convert to orders
-        orders = self.allocator.to_orders(target_pos, current_pos, prices)
+        # NOTE: turnover cap already limits per-tick position changes; don't add a huge deadband here.
+        orders = self.allocator.to_orders(target_pos, current_pos, prices, min_delta=1)
 
         # Execute orders
         if orders:

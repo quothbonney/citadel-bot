@@ -409,7 +409,7 @@ class Allocator:
         target: dict[str, float],
         current: dict[str, float],
         prices: dict[str, float],
-        min_delta: int = 1000,
+        min_delta: int = 1,
     ) -> list[Order]:
         """Convert position delta to orders."""
         orders = []
