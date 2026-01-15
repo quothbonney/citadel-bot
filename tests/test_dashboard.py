@@ -65,12 +65,13 @@ def _params() -> StrategyParams:
         gross_limit=1_000_000.0,
         net_limit=1_000_000.0,
         max_shares={"AAA": 200_000, "BBB": 200_000, "CCC": 200_000, "DDD": 200_000, "ETF": 300_000, "IND": 200_000},
-        turnover_k=10_000.0,
+        turnover_pct=0.10,
         min_threshold=0.0,
         top_n=2,
         horizon_bars=10,
         switch_lambda=0.10,
         regime_cutoff=2.5,
+        w_max=1.0,
         enabled=True,
     )
     return StrategyParams(

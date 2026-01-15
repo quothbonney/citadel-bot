@@ -72,12 +72,13 @@ class AllocatorConfig:
     gross_limit: float = 50_000_000.0
     net_limit: float = 10_000_000.0
     max_shares: dict[str, int] | None = None
-    turnover_k: float = 50_000.0
-    min_threshold: float = 0.12  # Minimum |spread| to be considered
-    top_n: int = 4  # Max signals to allocate to
-    horizon_bars: int = 10
-    switch_lambda: float = 0.10
-    regime_cutoff: float = 2.5
+    turnover_pct: float = 0.10       # Max position change per tick as fraction of max_shares
+    min_threshold: float = 0.0       # Minimum |S$| to even consider (extra filter, 0 = disabled)
+    top_n: int = 4                   # Max signals to allocate to
+    horizon_bars: int = 10           # EWMA horizon for sigma_hat
+    switch_lambda: float = 0.10      # L1 switching penalty in weight space
+    regime_cutoff: float = 2.5       # Kill edge when sigma_hat/median > cutoff
+    w_max: float = 1.0               # Max weight per signal (0 < w_max <= 1)
     enabled: bool = True
 
 
@@ -120,12 +121,13 @@ class StrategyParams:
                 gross_limit=a.get('gross_limit', 50_000_000.0),
                 net_limit=a.get('net_limit', 10_000_000.0),
                 max_shares=a.get('max_shares'),
-                turnover_k=a.get('turnover_k', 50_000.0),
-                min_threshold=a.get('min_threshold', 0.12),
+                turnover_pct=a.get('turnover_pct', 0.10),
+                min_threshold=a.get('min_threshold', 0.0),
                 top_n=a.get('top_n', 4),
                 horizon_bars=a.get('horizon_bars', 10),
                 switch_lambda=a.get('switch_lambda', 0.10),
                 regime_cutoff=a.get('regime_cutoff', 2.5),
+                w_max=a.get('w_max', 1.0),
                 enabled=a.get('enabled', True),
             )
 

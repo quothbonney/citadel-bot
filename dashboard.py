@@ -69,11 +69,12 @@ class StrategyInspector:
                 net_limit=params.allocator.net_limit,
                 max_shares=params.allocator.max_shares or mkt.max_shares,
                 top_n=params.allocator.top_n,
-                turnover_pct=params.allocator.turnover_k / params.allocator.gross_limit,
+                turnover_pct=params.allocator.turnover_pct,
                 min_threshold=params.allocator.min_threshold,
                 horizon_bars=params.allocator.horizon_bars,
                 switch_lambda=params.allocator.switch_lambda,
                 regime_cutoff=params.allocator.regime_cutoff,
+                w_max=params.allocator.w_max,
             )
             self.allocator = Allocator(cfg)
 
