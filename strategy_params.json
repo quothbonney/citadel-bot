@@ -13,6 +13,9 @@
     "turnover_k": 50000,
     "min_threshold": 0.05,
     "top_n": 4,
+    "horizon_bars": 10,
+    "switch_lambda": 0.10,
+    "regime_cutoff": 2.5,
     "enabled": true
   },
   "strategies": [

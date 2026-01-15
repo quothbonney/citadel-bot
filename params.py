@@ -75,6 +75,9 @@ class AllocatorConfig:
     turnover_k: float = 50_000.0
     min_threshold: float = 0.12  # Minimum |spread| to be considered
     top_n: int = 4  # Max signals to allocate to
+    horizon_bars: int = 10
+    switch_lambda: float = 0.10
+    regime_cutoff: float = 2.5
     enabled: bool = True
 
 
@@ -120,6 +123,9 @@ class StrategyParams:
                 turnover_k=a.get('turnover_k', 50_000.0),
                 min_threshold=a.get('min_threshold', 0.12),
                 top_n=a.get('top_n', 4),
+                horizon_bars=a.get('horizon_bars', 10),
+                switch_lambda=a.get('switch_lambda', 0.10),
+                regime_cutoff=a.get('regime_cutoff', 2.5),
                 enabled=a.get('enabled', True),
             )
 

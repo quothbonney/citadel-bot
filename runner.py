@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from RotmanInteractiveTraderApi import RotmanInteractiveTraderApi, OrderType, OrderAction
-from allocator import PortfolioAllocator, AllocatorConfig
+from allocator import Allocator, AllocatorConfig, Signal as AllocSignal
 from market import Market, market
 from params import StrategyParams
 from sizer import Sizer, UnitSizer
@@ -32,20 +32,23 @@ class StrategyRunner:
         self._build_strategies()
 
         # Initialize allocator if enabled
-        self.allocator: PortfolioAllocator | None = None
+        self.allocator: Allocator | None = None
         if params.allocator and params.allocator.enabled:
             config = AllocatorConfig(
                 gross_limit=params.allocator.gross_limit,
                 net_limit=params.allocator.net_limit,
                 max_shares=params.allocator.max_shares or mkt.max_shares,
-                turnover_k=params.allocator.turnover_k,
-                min_threshold=params.allocator.min_threshold,
                 top_n=params.allocator.top_n,
+                turnover_pct=params.allocator.turnover_k / params.allocator.gross_limit,
+                min_threshold=params.allocator.min_threshold,
+                horizon_bars=params.allocator.horizon_bars,
+                switch_lambda=params.allocator.switch_lambda,
+                regime_cutoff=params.allocator.regime_cutoff,
             )
-            self.allocator = PortfolioAllocator(config, params.width)
-            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM min_thresh=%.2f top_n=%d',
+            self.allocator = Allocator(config)
+            logging.info('Allocator enabled: gross=$%.0fM net=$%.0fM top_n=%d horizon=%d lambda=%.2f',
                          config.gross_limit / 1e6, config.net_limit / 1e6,
-                         config.min_threshold, config.top_n)
+                         config.top_n, config.horizon_bars, config.switch_lambda)
 
     def _build_strategies(self) -> None:
         """Instantiate all enabled strategies from params."""
@@ -148,12 +151,12 @@ class StrategyRunner:
 
     def _on_tick_allocated(self, portfolio: dict, case: dict) -> list[Signal]:
         """Process tick with top-N weighted allocation."""
-        # Collect signal specs from ALL strategies (allocator decides which to use)
-        specs = []
+        # Collect signals from all strategies
+        signals = []
         for strategy in self.strategies:
-            spec = strategy.get_signal_spec(portfolio, case)
-            if spec is not None:
-                specs.append(spec)
+            sig = self._get_alloc_signal(strategy, portfolio, case)
+            if sig is not None:
+                signals.append(sig)
 
         # Get prices
         prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}
@@ -162,10 +165,10 @@ class StrategyRunner:
         current_pos = {t: portfolio.get(t, {}).get('position', 0) for t in self.market.all_tickers}
 
         # Allocate (returns target positions and list of active strategy names)
-        target_pos, active_names = self.allocator.allocate(specs, prices, current_pos)
+        target_pos, active_names = self.allocator.allocate(signals, prices, current_pos)
 
         # Convert to orders
-        orders = self.allocator.positions_to_orders(target_pos, current_pos, prices)
+        orders = self.allocator.to_orders(target_pos, current_pos, prices)
 
         # Execute orders
         if orders:
@@ -174,10 +177,64 @@ class StrategyRunner:
             for order in orders:
                 self._execute_allocator_order(portfolio, order)
             logging.info('Allocator: %d orders | %s', len(orders), reason)
+            # Sync allocator state with actual positions (for next tick)
+            self.allocator.sync_positions(current_pos)
             return [alloc_signal]
 
         reason = f'active: {", ".join(active_names)}' if active_names else 'no signals above threshold'
+        # Even on hold, sync positions
+        self.allocator.sync_positions(current_pos)
         return [Signal('allocator', 'hold', reason=reason)]
+
+    def _get_alloc_signal(self, strategy: SignalStrategy, portfolio: dict, case: dict) -> AllocSignal | None:
+        """Extract allocator signal from strategy."""
+        # Run compute_signal to get the spread_adj
+        strategy.compute_signal(portfolio, case)
+        spread = getattr(strategy, '_spread_adj', None)
+        if spread is None:
+            return None
+
+        width = self.params.width or {}
+
+        # Build legs dict based on strategy type
+        if isinstance(strategy, PairCointStrategy):
+            p = strategy.params
+            prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}
+            pa = prices.get(p.a, 1)
+            pb = prices.get(p.b, 1)
+            hb = p.beta * (pa / pb) if pb > 0 else 1.0
+            # legs for +1 unit SHORT spread: sell a, buy b
+            legs = {p.a: -1.0, p.b: hb}
+            s_dollars = spread * pa
+            entry_dollars = p.pyramid.first_entry * pa
+            rt_cost_dollars = abs(legs[p.a]) * float(width.get(p.a, 0.0)) + abs(legs[p.b]) * float(width.get(p.b, 0.0))
+            return AllocSignal(
+                name=strategy.strategy_id,
+                s_dollars=s_dollars,
+                entry_dollars=entry_dollars,
+                rt_cost_dollars=rt_cost_dollars,
+                legs=legs,
+            )
+
+        elif isinstance(strategy, EtfNavStrategy):
+            # legs for +1 unit SHORT spread: sell ETF, buy stocks
+            legs = {'ETF': -1.0, 'AAA': 0.25, 'BBB': 0.25, 'CCC': 0.25, 'DDD': 0.25}
+            rt_cost_dollars = (
+                abs(legs['ETF']) * float(width.get('ETF', 0.0))
+                + abs(legs['AAA']) * float(width.get('AAA', 0.0))
+                + abs(legs['BBB']) * float(width.get('BBB', 0.0))
+                + abs(legs['CCC']) * float(width.get('CCC', 0.0))
+                + abs(legs['DDD']) * float(width.get('DDD', 0.0))
+            )
+            return AllocSignal(
+                name=strategy.strategy_id,
+                s_dollars=spread,
+                entry_dollars=strategy.params.pyramid.first_entry,
+                rt_cost_dollars=rt_cost_dollars,
+                legs=legs,
+            )
+
+        return None
 
     def _execute_allocator_order(self, portfolio: dict, order) -> None:
         """Execute a single allocator order."""

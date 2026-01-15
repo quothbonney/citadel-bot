@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import empyrical as ep
 
 from log_config import init_logging
 from market import market
@@ -25,382 +24,261 @@ from stalker import SessionLoader
 
 
 @dataclass
-class BacktestResult:
-    """Results from backtesting a strategy."""
-    strategy_id: str
-    n_trades: int = 0
-    gross_pnl: float = 0.0
-    costs: float = 0.0
-    net_pnl: float = 0.0
-    wins: int = 0
-    losses: int = 0
+class Position:
+    """Track position for a single ticker."""
+    qty: int = 0
+    avg_price: float = 0.0
+    realized: float = 0.0
 
-    @property
-    def win_rate(self) -> float:
-        total = self.wins + self.losses
-        return self.wins / total if total > 0 else 0.0
+    def fill(self, side: str, fill_qty: int, fill_price: float) -> float:
+        """Execute a fill and return realized PnL from this fill."""
+        realized_pnl = 0.0
+
+        if side == 'BUY':
+            if self.qty >= 0:
+                # Adding to long
+                total = self.avg_price * self.qty + fill_price * fill_qty
+                self.qty += fill_qty
+                self.avg_price = total / self.qty if self.qty else 0
+            else:
+                # Closing short
+                close_qty = min(fill_qty, -self.qty)
+                realized_pnl = (self.avg_price - fill_price) * close_qty
+                self.realized += realized_pnl
+                self.qty += fill_qty
+                if self.qty > 0:
+                    self.avg_price = fill_price
+        else:  # SELL
+            if self.qty <= 0:
+                # Adding to short
+                total = self.avg_price * (-self.qty) + fill_price * fill_qty
+                self.qty -= fill_qty
+                self.avg_price = total / (-self.qty) if self.qty else 0
+            else:
+                # Closing long
+                close_qty = min(fill_qty, self.qty)
+                realized_pnl = (fill_price - self.avg_price) * close_qty
+                self.realized += realized_pnl
+                self.qty -= fill_qty
+                if self.qty < 0:
+                    self.avg_price = fill_price
+
+        return realized_pnl
+
+    def mtm(self, mid: float) -> float:
+        """Mark-to-market unrealized PnL."""
+        if self.qty == 0:
+            return 0.0
+        if self.qty > 0:
+            return (mid - self.avg_price) * self.qty
+        return (self.avg_price - mid) * (-self.qty)
 
 
 @dataclass
-class Position:
-    """Track position for PnL calculation."""
-    ticker: str
-    quantity: int = 0
-    avg_price: float = 0.0
-    realized_pnl: float = 0.0
+class StrategyPnL:
+    """Track PnL for one strategy."""
+    name: str
+    positions: dict[str, Position] = field(default_factory=dict)
+    trades: int = 0
+    costs: float = 0.0
+    pnl_curve: list[float] = field(default_factory=list)
+
+    def fill_order(self, ticker: str, side: str, qty: int, price: float, spread: float) -> None:
+        if ticker not in self.positions:
+            self.positions[ticker] = Position()
+        self.positions[ticker].fill(side, qty, price)
+        self.costs += spread * qty / 2  # Half-spread cost
+
+    def total_realized(self) -> float:
+        return sum(p.realized for p in self.positions.values())
+
+    def total_unrealized(self, prices: dict[str, float]) -> float:
+        return sum(p.mtm(prices.get(t, 0)) for t, p in self.positions.items())
+
+    def net_pnl(self, prices: dict[str, float]) -> float:
+        return self.total_realized() + self.total_unrealized(prices) - self.costs
 
 
-class BacktestRunner:
-    """Run strategies on historical data and track simulated PnL."""
+class Backtest:
+    """Run strategies on historical data."""
 
     def __init__(self, params: StrategyParams, scale: int = 1) -> None:
-        self.params = params
         self.scale = scale
         self.sizer = FixedSizer(scale)
         self.runner = StrategyRunner(
-            client=None,  # No live execution
+            client=None,
             params=params,
             mkt=market,
             sizer=self.sizer,
             dry_run=True,
         )
 
-        # Track positions per strategy
-        self.positions: dict[str, dict[str, Position]] = {}
-        for strategy in self.runner.strategies:
-            self.positions[strategy.strategy_id] = {}
+        # Track PnL per strategy
+        self.pnl: dict[str, StrategyPnL] = {}
+        for strat in self.runner.strategies:
+            self.pnl[strat.strategy_id] = StrategyPnL(strat.strategy_id)
 
-        # Track results
-        self.results: dict[str, BacktestResult] = {}
-        for strategy in self.runner.strategies:
-            self.results[strategy.strategy_id] = BacktestResult(strategy.strategy_id)
-
-        # PnL curves
-        self.pnl_curves: dict[str, list[float]] = {}
-        for strategy in self.runner.strategies:
-            self.pnl_curves[strategy.strategy_id] = []
-
-        # Add allocator tracking if enabled
+        # Also track allocator if enabled
         if self.runner.allocator:
-            self.positions['allocator'] = {}
-            self.results['allocator'] = BacktestResult('allocator')
-            self.pnl_curves['allocator'] = []
+            self.pnl['allocator'] = StrategyPnL('allocator')
+            self._alloc_positions: dict[str, int] = {}  # For injecting into portfolio
 
-    def _get_price(self, portfolio: dict, ticker: str, side: str) -> float:
-        """Get execution price (bid for sell, ask for buy)."""
-        sec = portfolio.get(ticker, {})
-        if side == 'BUY':
-            return sec.get('ask', sec.get('last', 0))
-        return sec.get('bid', sec.get('last', 0))
-
-    def _simulate_fill(self, strategy_id: str, portfolio: dict, order, debug: bool = False) -> float:
-        """Simulate order fill and return cost (half-spread)."""
-        ticker = order.ticker
-        # Allocator already generates absolute sizes; don't scale again
-        if strategy_id == 'allocator':
-            qty = round(order.quantity)
-        else:
-            qty = round(order.quantity * self.scale)  # Scale up for strategy orders
-        side = order.side
-
-        # Get position
-        if ticker not in self.positions[strategy_id]:
-            self.positions[strategy_id][ticker] = Position(ticker)
-        pos = self.positions[strategy_id][ticker]
-
-        # Get fill price
-        price = self._get_price(portfolio, ticker, side)
-        if price <= 0:
-            return 0.0
-
-        if debug:
-            print(f'  FILL: {side} {qty} {ticker} @ {price:.2f}')
-            print(f'    pos before: qty={pos.quantity}, avg={pos.avg_price:.2f}, realized={pos.realized_pnl:.2f}')
-
-        # Half-spread cost
-        sec = portfolio.get(ticker, {})
-        bid = sec.get('bid', 0)
-        ask = sec.get('ask', 0)
-        spread = (ask - bid) if bid and ask else 0
-        cost = (spread / 2) * qty
-
-        # Update position
-        if side == 'BUY':
-            if pos.quantity >= 0:
-                # Adding to long
-                total_cost = pos.avg_price * pos.quantity + price * qty
-                pos.quantity += qty
-                pos.avg_price = total_cost / pos.quantity if pos.quantity else 0
-            else:
-                # Closing short
-                pnl = (pos.avg_price - price) * min(qty, -pos.quantity)
-                pos.realized_pnl += pnl
-                pos.quantity += qty
-                if pos.quantity > 0:
-                    pos.avg_price = price
-        else:  # SELL
-            if pos.quantity <= 0:
-                # Adding to short
-                total_cost = pos.avg_price * (-pos.quantity) + price * qty
-                pos.quantity -= qty
-                pos.avg_price = total_cost / (-pos.quantity) if pos.quantity else 0
-            else:
-                # Closing long
-                pnl = (price - pos.avg_price) * min(qty, pos.quantity)
-                pos.realized_pnl += pnl
-                pos.quantity -= qty
-                if pos.quantity < 0:
-                    pos.avg_price = price
-
-        if debug:
-            print(f'    pos after:  qty={pos.quantity}, avg={pos.avg_price:.2f}, realized={pos.realized_pnl:.2f}')
-
-        return cost
-
-    def _compute_unrealized_pnl(self, strategy_id: str, portfolio: dict) -> float:
-        """Compute unrealized PnL for a strategy."""
-        unrealized = 0.0
-        for ticker, pos in self.positions[strategy_id].items():
-            if pos.quantity == 0:
-                continue
-            sec = portfolio.get(ticker, {})
+    def _get_prices(self, portfolio: dict) -> dict[str, float]:
+        prices = {}
+        for t in market.all_tickers:
+            sec = portfolio.get(t, {})
             bid = sec.get('bid', 0)
             ask = sec.get('ask', 0)
-            mid = (bid + ask) / 2 if bid and ask else sec.get('last', 0)
-            if pos.quantity > 0:
-                unrealized += (mid - pos.avg_price) * pos.quantity
-            else:
-                unrealized += (pos.avg_price - mid) * (-pos.quantity)
-        return unrealized
+            prices[t] = (bid + ask) / 2 if bid and ask else sec.get('last', 0)
+        return prices
 
-    def process_tick(self, portfolio: dict, case: dict, tick_num: int = 0, trace_first_n: int = 0) -> list:
-        """Process one tick through all strategies."""
+    def _get_spread(self, portfolio: dict, ticker: str) -> float:
+        sec = portfolio.get(ticker, {})
+        return sec.get('ask', 0) - sec.get('bid', 0)
+
+    def process_tick(self, portfolio: dict, case: dict) -> None:
+        """Process one tick."""
+        # Inject allocator positions if tracking
+        if self.runner.allocator and hasattr(self, '_alloc_positions'):
+            for t, qty in self._alloc_positions.items():
+                if t in portfolio:
+                    portfolio[t]['position'] = qty
+
+        # Run strategies
         signals = self.runner.on_tick(portfolio, case)
+        prices = self._get_prices(portfolio)
 
         for signal in signals:
             sid = signal.strategy_id
-            result = self.results[sid]
-
-            # Enable debug for first N trades of specified strategy
-            debug = (trace_first_n > 0 and
-                     signal.action != 'hold' and
-                     result.n_trades < trace_first_n)
-
-            if debug:
-                print(f'\n=== TICK {tick_num}: {sid} {signal.action} ===')
-                print(f'  reason: {signal.reason}')
+            tracker = self.pnl.get(sid)
+            if tracker is None:
+                continue
 
             if signal.action in ('enter_long', 'enter_short'):
-                result.n_trades += 1
+                tracker.trades += 1
 
             # Simulate fills
-            tick_cost = 0.0
             for order in signal.orders:
-                cost = self._simulate_fill(sid, portfolio, order, debug=debug)
-                tick_cost += cost
+                if sid == 'allocator':
+                    qty = round(order.quantity)
+                else:
+                    qty = round(order.quantity * self.scale)
 
-            result.costs += tick_cost
+                spread = self._get_spread(portfolio, order.ticker)
+                fill_price = order.price
 
-            # Compute total PnL
-            realized = sum(p.realized_pnl for p in self.positions[sid].values())
-            unrealized = self._compute_unrealized_pnl(sid, portfolio)
-            result.gross_pnl = realized + unrealized
-            result.net_pnl = result.gross_pnl - result.costs
+                tracker.fill_order(order.ticker, order.side, qty, fill_price, spread)
 
-            if debug:
-                print(f'  realized={realized:.2f}, unrealized={unrealized:.2f}')
-                print(f'  gross={result.gross_pnl:.2f}, costs={result.costs:.2f}, net={result.net_pnl:.2f}')
+                # Update allocator position tracking
+                if sid == 'allocator':
+                    cur = self._alloc_positions.get(order.ticker, 0)
+                    delta = qty if order.side == 'BUY' else -qty
+                    self._alloc_positions[order.ticker] = cur + delta
 
-            self.pnl_curves[sid].append(result.net_pnl)
-
-        return signals
-
-    def _compute_metrics(self, pnl_curve: list[float]) -> dict:
-        """Compute risk metrics from PnL curve using empyrical."""
-        if len(pnl_curve) < 2:
-            return {}
-
-        pnl = np.array(pnl_curve)
-        returns = np.diff(pnl) / (self.scale * 100)  # Normalize by notional
-
-        # Handle edge cases
-        if len(returns) == 0 or np.all(returns == 0):
-            return {}
-
-        # Compute max drawdown from PnL curve (peak to trough in dollars)
-        running_max = np.maximum.accumulate(pnl)
-        drawdowns = pnl - running_max
-        max_dd = drawdowns.min()
-
-        return {
-            'sharpe': ep.sharpe_ratio(returns),
-            'sortino': ep.sortino_ratio(returns),
-            'max_drawdown': max_dd,  # Dollar value, not percentage
-            'annual_return': ep.annual_return(returns),
-            'annual_volatility': ep.annual_volatility(returns),
-        }
+            # Record PnL curve
+            tracker.pnl_curve.append(tracker.net_pnl(prices))
+        
+        # Sync allocator internal state with actual positions
+        if self.runner.allocator:
+            self.runner.allocator.sync_positions(self._alloc_positions)
 
     def summary(self) -> None:
-        """Print backtest summary."""
+        """Print results."""
         print('\n' + '=' * 60)
         print('BACKTEST RESULTS')
         print('=' * 60)
 
-        total_pnl = 0.0
-        all_pnl_curves = []
+        total = 0.0
+        for sid, tracker in self.pnl.items():
+            if not tracker.pnl_curve:
+                continue
 
-        for sid, result in self.results.items():
-            pnl_curve = self.pnl_curves[sid]
-            metrics = self._compute_metrics(pnl_curve)
+            final_pnl = tracker.pnl_curve[-1]
+            total += final_pnl
 
             print(f'\n{sid}:')
-            print(f'  Trades:   {result.n_trades}')
-            print(f'  Gross:    ${result.gross_pnl:,.2f}')
-            print(f'  Costs:    ${result.costs:,.2f}')
-            print(f'  Net PnL:  ${result.net_pnl:,.2f}')
+            print(f'  Trades:   {tracker.trades}')
+            print(f'  Realized: ${tracker.total_realized():,.2f}')
+            print(f'  Costs:    ${tracker.costs:,.2f}')
+            print(f'  Net PnL:  ${final_pnl:,.2f}')
 
-            if metrics:
-                print(f'  Sharpe:   {metrics["sharpe"]:.2f}')
-                print(f'  Sortino:  {metrics["sortino"]:.2f}')
-                print(f'  Max DD:   ${metrics["max_drawdown"]:,.2f}')
+            # Compute Sharpe if enough data
+            if len(tracker.pnl_curve) > 10:
+                returns = np.diff(tracker.pnl_curve)
+                if returns.std() > 0:
+                    sharpe = returns.mean() / returns.std() * np.sqrt(252 * 390)
+                    print(f'  Sharpe:   {sharpe:.2f}')
 
-            total_pnl += result.net_pnl
-            all_pnl_curves.append(pnl_curve)
+                # Max drawdown
+                curve = np.array(tracker.pnl_curve)
+                peak = np.maximum.accumulate(curve)
+                dd = (curve - peak).min()
+                print(f'  Max DD:   ${dd:,.2f}')
 
-        # Compute aggregate metrics
-        if all_pnl_curves:
-            min_len = min(len(c) for c in all_pnl_curves)
-            combined = np.sum([np.array(c[:min_len]) for c in all_pnl_curves], axis=0)
-            agg_metrics = self._compute_metrics(combined.tolist())
-
-            print(f'\n{"=" * 60}')
-            print(f'TOTAL NET PnL: ${total_pnl:,.2f}')
-            if agg_metrics:
-                print(f'Sharpe:        {agg_metrics["sharpe"]:.2f}')
-                print(f'Sortino:       {agg_metrics["sortino"]:.2f}')
-                print(f'Max Drawdown:  ${agg_metrics["max_drawdown"]:,.2f}')
-            print('=' * 60)
-        else:
-            print(f'\n{"=" * 60}')
-            print(f'TOTAL NET PnL: ${total_pnl:,.2f}')
-            print('=' * 60)
+        print(f'\n{"=" * 60}')
+        print(f'TOTAL: ${total:,.2f}')
+        print('=' * 60)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Backtest strategies on recorded data')
-    parser.add_argument('session', nargs='?', help='Path to stalker session directory')
-    parser.add_argument('--params', '-p', default=str(DEFAULT_PARAMS_PATH), help='Strategy params file')
-    parser.add_argument('--scale', '-s', type=int, default=1000, help='Position size multiplier')
+    parser = argparse.ArgumentParser(description='Backtest strategies')
+    parser.add_argument('session', nargs='?', help='Session directory')
+    parser.add_argument('--params', '-p', default=str(DEFAULT_PARAMS_PATH))
+    parser.add_argument('--scale', '-s', type=int, default=1000)
     parser.add_argument('--verbose', '-v', action='store_true')
-    parser.add_argument('--debug', '-d', action='store_true', help='Print debug info for signals')
-    parser.add_argument('--trace', '-t', type=int, default=0, help='Trace first N trades of pair_BBB_DDD')
     args = parser.parse_args()
 
     init_logging(console_level='DEBUG' if args.verbose else 'WARNING')
 
-    # Default session path
+    # Find session
     if args.session:
         session_path = Path(args.session)
     else:
-        session_path = Path('/Users/wudd/Downloads/20260114_182237_Citadel_Securities_Quant_Invitational_2025_Trading_Competition')
+        # Try to find most recent session in Downloads
+        downloads = Path('/Users/wudd/Downloads')
+        sessions = sorted([d for d in downloads.iterdir() if d.is_dir() and 'Citadel' in d.name])
+        if not sessions:
+            print('No session found')
+            sys.exit(1)
+        session_path = sessions[-1]
 
     if not session_path.exists():
         print(f'Session not found: {session_path}')
         sys.exit(1)
 
     # Load session
-    print(f'Loading session: {session_path.name}')
+    print(f'Loading: {session_path.name}')
     session = SessionLoader(session_path)
-    print(f'Case: {session.case.get("name")}')
     print(f'Tickers: {session.tickers}')
+
+    # Count unique ticks
+    tick_count = 0
+    for _ in session.ticks():
+        tick_count += 1
+    print(f'Unique ticks: {tick_count}')
 
     # Load params
     params = StrategyParams.load(args.params)
-    print(f'Strategies: {len(params.pair_coint)} pair + {"1 ETF-NAV" if params.etf_nav else "0 ETF-NAV"}')
+    n_strat = len(params.pair_coint) + (1 if params.etf_nav else 0)
+    print(f'Strategies: {n_strat}')
     print(f'Scale: {args.scale}x')
 
     # Run backtest
-    bt = BacktestRunner(params, scale=args.scale)
+    bt = Backtest(params, scale=args.scale)
 
-    # Debug: collect stats
-    debug_data = {
-        'pair_BBB_DDD': {'z': [], 'z_adj': [], 'dollar_mag': [], 'entries': [], 'exits': []},
-        'pair_AAA_DDD': {'z': [], 'z_adj': [], 'dollar_mag': [], 'entries': [], 'exits': []},
-        'etf_nav': {'spread': [], 'spread_adj': [], 'entries': [], 'exits': []},
-    }
-
-    tick_count = 0
+    processed = 0
     for tick in session.ticks():
         portfolio = tick.securities
         case = {'period': tick.period, 'tick': tick.tick, 'status': 'ACTIVE'}
 
-        # Inject tracked positions into portfolio for allocator
-        if bt.runner.allocator and 'allocator' in bt.positions:
-            for ticker, pos in bt.positions['allocator'].items():
-                if ticker in portfolio:
-                    portfolio[ticker]['position'] = pos.quantity
+        bt.process_tick(portfolio, case)
 
-        # Collect debug info before processing
-        if args.debug:
-            import math
-            # BBB-DDD
-            p = params.pair_coint[0]  # BBB-DDD
-            price_a = (portfolio['BBB']['bid'] + portfolio['BBB']['ask']) / 2
-            price_b = (portfolio['DDD']['bid'] + portfolio['DDD']['ask']) / 2
-            z = math.log(price_a) - (p.c + p.beta * math.log(price_b))
-            debug_data['pair_BBB_DDD']['z'].append(z)
+        processed += 1
+        if processed % 500 == 0:
+            print(f'Processed {processed} ticks...')
 
-            # AAA-DDD
-            p2 = params.pair_coint[1]  # AAA-DDD
-            price_a2 = (portfolio['AAA']['bid'] + portfolio['AAA']['ask']) / 2
-            z2 = math.log(price_a2) - (p2.c + p2.beta * math.log(price_b))
-            debug_data['pair_AAA_DDD']['z'].append(z2)
-
-            # ETF-NAV
-            etf_mid = (portfolio['ETF']['bid'] + portfolio['ETF']['ask']) / 2
-            nav = sum((portfolio[s]['bid'] + portfolio[s]['ask']) / 2 for s in ['AAA', 'BBB', 'CCC', 'DDD']) / 4
-            spread = etf_mid - nav
-            debug_data['etf_nav']['spread'].append(spread)
-
-        signals = bt.process_tick(portfolio, case, tick_num=tick_count, trace_first_n=args.trace)
-
-        # Track entries/exits
-        if args.debug:
-            for sig in signals:
-                if sig.action in ('enter_long', 'enter_short'):
-                    debug_data.get(sig.strategy_id, {}).get('entries', []).append((tick_count, sig.action, sig.reason))
-                elif sig.action == 'exit':
-                    debug_data.get(sig.strategy_id, {}).get('exits', []).append((tick_count, sig.reason))
-
-        tick_count += 1
-        if tick_count % 500 == 0:
-            print(f'Processed {tick_count} ticks...')
-
-    print(f'\nProcessed {tick_count} total ticks')
+    print(f'\nProcessed {processed} ticks')
     bt.summary()
-
-    # Print debug stats
-    if args.debug:
-        print('\n' + '=' * 60)
-        print('DEBUG: Signal Statistics')
-        print('=' * 60)
-
-        for sid, data in debug_data.items():
-            print(f'\n{sid}:')
-            if 'z' in data and data['z']:
-                z_arr = np.array(data['z'])
-                print(f'  z:        mean={z_arr.mean():.6f}  std={z_arr.std():.6f}  min={z_arr.min():.6f}  max={z_arr.max():.6f}')
-            if 'spread' in data and data['spread']:
-                s_arr = np.array(data['spread'])
-                print(f'  spread:   mean={s_arr.mean():.4f}  std={s_arr.std():.4f}  min={s_arr.min():.4f}  max={s_arr.max():.4f}')
-            print(f'  entries:  {len(data.get("entries", []))}')
-            print(f'  exits:    {len(data.get("exits", []))}')
-
-            # Show first few entries
-            if data.get('entries'):
-                print(f'  first 5 entries:')
-                for i, (t, action, reason) in enumerate(data['entries'][:5]):
-                    print(f'    tick {t}: {action} - {reason}')
 
 
 if __name__ == '__main__':

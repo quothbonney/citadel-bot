@@ -61,21 +61,47 @@ class SessionLoader:
             return list(tick.securities.keys())
         return []
 
-    def ticks(self) -> Generator[Tick, None, None]:
-        """Iterate through all tick snapshots."""
+    def ticks(self, dedupe: bool = True) -> Generator[Tick, None, None]:
+        """Iterate through tick snapshots.
+        
+        Args:
+            dedupe: If True, yields only the LAST snapshot per (period, tick).
+                    This handles the stalker polling faster than tick rate.
+        """
         path = self.session_dir / 'ticks.jsonl'
         if not path.exists():
             return
 
+        if not dedupe:
+            # Raw mode: yield every snapshot
+            with open(path) as f:
+                for line in f:
+                    data = json.loads(line)
+                    yield Tick(
+                        ts=data['ts'],
+                        period=data['period'],
+                        tick=data['tick'],
+                        securities=data['securities'],
+                    )
+            return
+
+        # Deduped mode: collect all, keep last per (period, tick)
+        snapshots: dict[tuple[int, int], dict] = {}
         with open(path) as f:
             for line in f:
                 data = json.loads(line)
-                yield Tick(
-                    ts=data['ts'],
-                    period=data['period'],
-                    tick=data['tick'],
-                    securities=data['securities'],
-                )
+                key = (data['period'], data['tick'])
+                snapshots[key] = data  # Later entries overwrite earlier
+
+        # Yield in sorted order
+        for key in sorted(snapshots.keys()):
+            data = snapshots[key]
+            yield Tick(
+                ts=data['ts'],
+                period=data['period'],
+                tick=data['tick'],
+                securities=data['securities'],
+            )
 
     def books(self, ticker: str = None) -> Generator[BookSnapshot, None, None]:
         """Iterate through order book snapshots, optionally filtered by ticker."""
