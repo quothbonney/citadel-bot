@@ -6,6 +6,7 @@ from typing import Any, Protocol
 from flask import Flask, jsonify
 
 from RotmanInteractiveTraderApi import RotmanInteractiveTraderApi
+from allocator import Allocator, AllocatorConfig as AllocatorAlgoConfig, Signal as AllocSignal
 from market import Market, market
 from params import StrategyParams, DEFAULT_PARAMS_PATH
 from settings import settings
@@ -51,7 +52,9 @@ class StrategyInspector:
 
     def __init__(self, params: StrategyParams, mkt: Market = market) -> None:
         self.market = mkt
+        self.params = params
         self.strategies = []
+        self.allocator: Allocator | None = None
 
         for p in params.pair_coint:
             if p.enabled:
@@ -59,6 +62,20 @@ class StrategyInspector:
 
         if params.etf_nav and params.etf_nav.enabled:
             self.strategies.append(EtfNavStrategy(params.etf_nav, self.market))
+
+        if params.allocator and params.allocator.enabled:
+            cfg = AllocatorAlgoConfig(
+                gross_limit=params.allocator.gross_limit,
+                net_limit=params.allocator.net_limit,
+                max_shares=params.allocator.max_shares or mkt.max_shares,
+                top_n=params.allocator.top_n,
+                turnover_pct=params.allocator.turnover_k / params.allocator.gross_limit,
+                min_threshold=params.allocator.min_threshold,
+                horizon_bars=params.allocator.horizon_bars,
+                switch_lambda=params.allocator.switch_lambda,
+                regime_cutoff=params.allocator.regime_cutoff,
+            )
+            self.allocator = Allocator(cfg)
 
     def evaluate(self, portfolio: dict, case: dict) -> list[StrategyView]:
         views: list[StrategyView] = []
@@ -82,6 +99,70 @@ class StrategyInspector:
             ))
 
         return views
+
+    def allocator_snapshot(self, portfolio: dict, case: dict) -> dict[str, object] | None:
+        """Compute allocator diagnostics for the current snapshot (no execution)."""
+        if self.allocator is None:
+            return None
+
+        # Build allocator signals (same semantics as runner.py)
+        width = self.params.width or {}
+        prices = {t: get_mid(portfolio.get(t, {})) for t in self.market.all_tickers}
+        current_pos = {t: portfolio.get(t, {}).get("position", 0) for t in self.market.all_tickers}
+
+        sigs: list[AllocSignal] = []
+        for strat in self.strategies:
+            # compute_signal already called in evaluate(), but call again for safety/standalone usage
+            strat.compute_signal(portfolio, case)
+            spread = getattr(strat, "_spread_adj", None)
+            if spread is None:
+                continue
+
+            if isinstance(strat, PairCointStrategy):
+                p = strat.params
+                pa = prices.get(p.a, 1.0)
+                pb = prices.get(p.b, 1.0)
+                hb = p.beta * (pa / pb) if pb > 0 else 1.0
+                legs = {p.a: -1.0, p.b: hb}
+                s_dollars = float(spread) * float(pa)
+                entry_dollars = float(p.pyramid.first_entry) * float(pa)
+                rt_cost_dollars = abs(legs[p.a]) * float(width.get(p.a, 0.0)) + abs(legs[p.b]) * float(width.get(p.b, 0.0))
+                sigs.append(AllocSignal(
+                    name=strat.strategy_id,
+                    s_dollars=s_dollars,
+                    entry_dollars=entry_dollars,
+                    rt_cost_dollars=rt_cost_dollars,
+                    legs=legs,
+                ))
+
+            elif isinstance(strat, EtfNavStrategy):
+                legs = {"ETF": -1.0, "AAA": 0.25, "BBB": 0.25, "CCC": 0.25, "DDD": 0.25}
+                rt_cost_dollars = (
+                    abs(legs["ETF"]) * float(width.get("ETF", 0.0))
+                    + abs(legs["AAA"]) * float(width.get("AAA", 0.0))
+                    + abs(legs["BBB"]) * float(width.get("BBB", 0.0))
+                    + abs(legs["CCC"]) * float(width.get("CCC", 0.0))
+                    + abs(legs["DDD"]) * float(width.get("DDD", 0.0))
+                )
+                sigs.append(AllocSignal(
+                    name=strat.strategy_id,
+                    s_dollars=float(spread),
+                    entry_dollars=float(strat.params.pyramid.first_entry),
+                    rt_cost_dollars=rt_cost_dollars,
+                    legs=legs,
+                ))
+
+        target_pos, active = self.allocator.allocate(sigs, prices, current_pos)
+        orders = self.allocator.to_orders(target_pos, current_pos, prices)
+        diag = self.allocator.diagnostics()
+
+        return {
+            "active": active,
+            "orders": [o.__dict__ for o in orders],
+            "target_pos": target_pos,
+            "current_pos": current_pos,
+            "diagnostics": diag,
+        }
 
     def _compute_strength(self, strat, spread: float | None) -> float | None:
         """Compute signal strength: |spread| / sigma."""
@@ -192,11 +273,14 @@ def create_app(
     def strategies():
         snap = snapshot_provider.snapshot()
         case = snap.get("case", {})
-        views = inspector.evaluate(snap["portfolio"], case)
+        portfolio = snap["portfolio"]
+        views = inspector.evaluate(portfolio, case)
+        alloc = inspector.allocator_snapshot(portfolio, case)
 
         return jsonify({
             "case": case,
             "strategies": [view.__dict__ for view in views],
+            "allocator": alloc,
         })
 
     @app.route("/")
@@ -263,6 +347,8 @@ def create_app(
   <div id="positions"></div>
 
   <h2>Strategies</h2>
+  <h2>Allocator</h2>
+  <div id="allocator"></div>
   <div id="strategies"></div>
 
   <script>
@@ -417,6 +503,47 @@ def create_app(
         </table>`;
     }
 
+    function renderAllocator(payload) {
+      const el = document.getElementById("allocator");
+      const a = payload.allocator;
+      if (!a) { el.innerHTML = "<div class='card'>Allocator disabled</div>"; return; }
+
+      const diag = a.diagnostics || {};
+      const weights = diag.weights || {};
+      const edges = diag.edges || {};
+      const sigma = diag.sigma_hat || {};
+      const netRaw = diag.net_raw || {};
+      const ratio = diag.regime_ratio || {};
+      const active = (diag.active || a.active || []).join(", ");
+
+      const names = Array.from(new Set([].concat(Object.keys(weights), Object.keys(edges), Object.keys(sigma), Object.keys(netRaw), Object.keys(ratio))))
+        .sort((x, y) => (weights[y] || 0) - (weights[x] || 0));
+
+      const rows = names.map(n => `
+        <tr>
+          <td>${n}</td>
+          <td>${(weights[n] || 0).toFixed(3)}</td>
+          <td>${(edges[n] || 0).toFixed(3)}</td>
+          <td>${fmt(netRaw[n] || 0, 2)}</td>
+          <td>${fmt(sigma[n] || 0, 3)}</td>
+          <td>${(ratio[n] || 0).toFixed(2)}</td>
+        </tr>
+      `).join("");
+
+      const reason = diag.reason || "n/a";
+      const orderCount = (a.orders || []).length;
+
+      el.innerHTML = `
+        <div class="card">
+          <div><b>Reason</b>: ${reason} | <b>Active</b>: ${active || "none"} | <b>Orders</b>: ${orderCount}</div>
+          <table style="margin-top:8px">
+            <thead><tr><th>Book</th><th>w</th><th>edge</th><th>net$</th><th>sigma</th><th>sigma/med</th></tr></thead>
+            <tbody>${rows || ""}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
     function renderCase(c) {
       const pct = ((c.tick / c.ticks_per_period) * 100).toFixed(0);
       const statusClass = c.status === "ACTIVE" ? "ok" : "warn";
@@ -457,6 +584,7 @@ def create_app(
         renderExposure(gross, net);
         renderPositions(pos);
         renderStrategies(strat);
+        renderAllocator(strat);
       } catch (e) {
         document.getElementById("status").innerHTML = '<span class="err">ERR: ' + e + '</span>';
       }

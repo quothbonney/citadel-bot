@@ -3,7 +3,7 @@ import math
 import pytest
 
 from dashboard import create_app
-from params import StrategyParams, PairCointParams, PyramidParams
+from params import StrategyParams, PairCointParams, PyramidParams, AllocatorConfig
 
 
 class StubProvider:
@@ -61,7 +61,24 @@ def _params() -> StrategyParams:
         pyramid=pyramid,
         enabled=True,
     )
-    return StrategyParams(pair_coint=[pair], etf_nav=None, width={}, allocator=None)
+    alloc = AllocatorConfig(
+        gross_limit=1_000_000.0,
+        net_limit=1_000_000.0,
+        max_shares={"AAA": 200_000, "BBB": 200_000, "CCC": 200_000, "DDD": 200_000, "ETF": 300_000, "IND": 200_000},
+        turnover_k=10_000.0,
+        min_threshold=0.0,
+        top_n=2,
+        horizon_bars=10,
+        switch_lambda=0.10,
+        regime_cutoff=2.5,
+        enabled=True,
+    )
+    return StrategyParams(
+        pair_coint=[pair],
+        etf_nav=None,
+        width={"AAA": 0.04, "BBB": 0.06},
+        allocator=alloc,
+    )
 
 
 @pytest.fixture
@@ -109,6 +126,9 @@ def test_strategies_endpoint_reports_spread(client):
     assert "action" in first
     assert "strength" in first
     assert "expected_pnl" in first
+
+    # Allocator diagnostics should be included when allocator is enabled
+    assert "allocator" in payload
 
 
 def test_root_serves_html_dashboard(client):

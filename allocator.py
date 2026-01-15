@@ -79,6 +79,7 @@ class Allocator:
         self._prev_w: dict[str, float] = {}
         self._last_s: dict[str, float] = {}
         self._var_s: dict[str, float] = {}  # EWMA variance of ΔS per signal
+        self._last_diag: dict[str, object] = {}
 
     def allocate(
         self,
@@ -92,16 +93,26 @@ class Allocator:
             (target_positions, active_strategy_names)
         """
         if not signals:
+            self._last_diag = {"reason": "no_signals"}
             return self._flatten(current_pos), []
 
         # Optional coarse filter
         signals = [s for s in signals if abs(s.s_dollars) >= self.config.min_threshold]
         if not signals:
+            self._last_diag = {"reason": "below_min_threshold"}
             return self._flatten(current_pos), []
 
         # Compute edges for all provided signals
-        edges, sigma_hat = self._compute_edges(signals)
+        edges, sigma_hat, median_sigma, regime_ratio, net_raw = self._compute_edges(signals)
         if not edges:
+            self._last_diag = {
+                "reason": "no_positive_edges",
+                "edges": {},
+                "sigma_hat": sigma_hat,
+                "median_sigma": median_sigma,
+                "regime_ratio": regime_ratio,
+                "net_raw": net_raw,
+            }
             return self._flatten(current_pos), []
 
         # Candidate set: include top-N by edge plus top-N by previous weight (stability).
@@ -154,6 +165,16 @@ class Allocator:
         pos = self._cap_turnover(prev, pos)
         
         self._prev_w = w
+        self._last_diag = {
+            "reason": "ok",
+            "active": active_names,
+            "weights": w,
+            "edges": edges,
+            "sigma_hat": sigma_hat,
+            "median_sigma": median_sigma,
+            "regime_ratio": regime_ratio,
+            "net_raw": net_raw,
+        }
         return pos, active_names
     
     def sync_positions(self, actual_pos: dict[str, float]) -> None:
@@ -207,8 +228,16 @@ class Allocator:
         
         return result
 
-    def _compute_edges(self, signals: list[Signal]) -> tuple[dict[str, float], dict[str, float]]:
-        """Compute net edge scores and sigma_hat for each signal."""
+    def _compute_edges(self, signals: list[Signal]) -> tuple[dict[str, float], dict[str, float], float, dict[str, float], dict[str, float]]:
+        """Compute net edge scores and sigma_hat for each signal.
+
+        Returns:
+            edges: positive edge scores
+            sigma_hat: EWMA sigma of ΔS
+            median_sigma: median of sigma_hat over positive sigmas
+            regime_ratio: sigma_hat / median_sigma (0 if median_sigma==0)
+            net_raw: max(0, |S| - entry - rt_cost) (in dollars)
+        """
         h = self.config.horizon_bars
         if h <= 0:
             raise ValueError("horizon_bars must be > 0")
@@ -233,30 +262,43 @@ class Allocator:
 
         # Median sigma for regime filter (only consider > 0)
         positive_sigmas = sorted(v for v in sigma_hat.values() if v > 0)
-        median = 0.0
+        median_sigma = 0.0
         if positive_sigmas:
             mid = len(positive_sigmas) // 2
             if len(positive_sigmas) % 2:
-                median = positive_sigmas[mid]
+                median_sigma = positive_sigmas[mid]
             else:
-                median = 0.5 * (positive_sigmas[mid - 1] + positive_sigmas[mid])
+                median_sigma = 0.5 * (positive_sigmas[mid - 1] + positive_sigmas[mid])
 
         edges: dict[str, float] = {}
+        regime_ratio: dict[str, float] = {}
+        net_raw: dict[str, float] = {}
         for s in signals:
             sig = sigma_hat.get(s.name, 0.0)
             if sig <= 0:
+                regime_ratio[s.name] = 0.0
+                net_raw[s.name] = 0.0
                 continue
 
-            if median > 0 and (sig / median) > self.config.regime_cutoff:
-                continue
+            ratio = (sig / median_sigma) if median_sigma > 0 else 0.0
+            regime_ratio[s.name] = ratio
 
             net = abs(s.s_dollars) - s.entry_dollars - s.rt_cost_dollars
+            net_raw[s.name] = max(0.0, net)
+
+            if median_sigma > 0 and ratio > self.config.regime_cutoff:
+                continue
+
             if net <= 0:
                 continue
 
             edges[s.name] = net / sig
 
-        return edges, sigma_hat
+        return edges, sigma_hat, median_sigma, regime_ratio, net_raw
+
+    def diagnostics(self) -> dict[str, object]:
+        """Return last allocator diagnostics (for dashboards/debugging)."""
+        return dict(self._last_diag)
 
     def _optimize_weights(self, edges: dict[str, float], wprev: dict[str, float]) -> dict[str, float]:
         """Solve L1-penalized weight update over a small candidate set.
